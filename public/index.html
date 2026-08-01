@@ -231,7 +231,9 @@ button.btn:disabled,.chip:disabled{opacity:.32;pointer-events:none}
 ========================================== */
 const LSK='dfb_state_v3', LSH='dfb_hist_v2';
 const THRESH={1:{a:240,b:360},2:{a:180,b:300},3:{a:120,b:240},4:{a:90,b:90}}; // at 15:00 quarters
-function thr(r){ const f=(S&&S.qlen?S.qlen:900)/900; const t=THRESH[r]; return {a:t.a*f,b:t.b*f}; }
+function thr(r){ const f=(S&&S.qlen?S.qlen:900)/900; const t=THRESH[r]; const m=S?(S.defMod||0):0;
+  return {a:Math.max(10,t.a*f+m), b:Math.max(15,t.b*f+m)}; }
+const modUnit=()=>60*((S&&S.qlen?S.qlen:900)/900);
 const TABLES={
   fast:{no:{1:'TO',2:'FD',3:'FD',4:'TD',5:'TD',6:'TD'}, def:{1:'TO',2:'TO',3:'FD',4:'FD',5:'FD',6:'FD'}},
   mid: {no:{1:'TO',2:'TO',3:'FD',4:'FD',5:'TD',6:'TD'}, def:{1:'TO',2:'TO',3:'TO',4:'FD',5:'FD',6:'FD'}},
@@ -263,7 +265,8 @@ const now=()=>Date.now()/1000;
 const elapsedDrink=()=>S.pauseE!=null?S.pauseE:(S.t0?now()-S.t0:0);
 const effClock=()=>S&&S.running&&S.canchor?Math.max(0,S.clock-(now()-S.canchor)):(S?S.clock:0);
 const roster=i=>S.teams[i].players;
-const drinker=i=>roster(i)[S.rot[i]%roster(i).length];
+const guestOf=i=>{ const t=S.teams[i]; if(!t.guest)t.guest={name:'Guest_'+(i===0?'Home':'Away'),shots:0,chugsO:[],chugsD:[]}; return t.guest; };
+const drinker=i=>(S.guestIn&&S.guestIn[i])?guestOf(i):roster(i)[S.rot[i]%roster(i).length];
 function freshStats(){return {td:0,fg:0,to:0,fd:0,shots:0,coach:0,chugsO:[],chugsD:[],stops:0}}
 const avgT=c=>c&&c.length?fmt(c.reduce((a,b)=>a+b,0)/c.length):'—';
 const drinkCt=p=>((p.chugsO||[]).length+(p.chugsD||[]).length);
@@ -293,7 +296,10 @@ function openWhoPicker(){
 
 /* ---------- persistence & sync ---------- */
 function save(){ if(S) localStorage.setItem(LSK,JSON.stringify(S)); localStorage.setItem(LSH,JSON.stringify(hist)); roomSend(); }
-function log(txt){ S.log.unshift({q:S.qtr,t:fmt(effClock()),txt:drunkify(txt)}); if(S.log.length>500)S.log.pop(); }
+const soberMode=()=>!!localStorage.getItem('dfb_sober');
+function toggleSober(){ localStorage.setItem('dfb_sober',soberMode()?'':'1'); render(); }
+function logLine(l){ return soberMode()? l.txt : (l.dtxt||l.txt); }
+function log(txt){ S.log.unshift({q:S.qtr,t:fmt(effClock()),txt,dtxt:drunkify(txt)}); if(S.log.length>500)S.log.pop(); }
 function roomSend(){ if(!R.applying && R.ws && R.ws.readyState===1 && S && S.phase!=='setup') R.ws.send(JSON.stringify({type:'state',state:S})); }
 function serverURL(){
   if(!R.url){ R.url = /^https?:$/.test(location.protocol) ? location.origin : DEFAULT_SERVER;
@@ -309,7 +315,7 @@ function connectRoom(code){
   ws.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(e){return;}
     if(m.type==='state'&&m.seq>R.seq&&m.state){
       const first=R.seq===0;
-      R.seq=m.seq; R.applying=true; S=m.state;
+      R.seq=m.seq; R.applying=true; S=m.state; if(!S.guestIn)S.guestIn=[false,false];
       if(first) shownEvt=(S.evt&&S.evt.n)||0;
       stopDrinkTick(); if(S.dphase==='drink'&&S.t0&&S.pauseE==null&&!S.timeout)startDrinkTick();
       stopClock(); if(S.running)startClock();
@@ -402,8 +408,11 @@ async function setAwake(on){
 /* ---------- drunk announcer ---------- */
 function drunkLevel(){
   if(!S||!S.teams[0].players) return 0;
-  let d=0; S.teams.forEach(t=>t.players.forEach(p=>{ d+=drinkCt(p)+p.shots; }));
-  return d>=21?3:d>=13?2:d>=6?1:0;
+  let d=0, n=0;
+  S.teams.forEach(t=>{ n+=t.players.length;
+    t.players.concat(t.guest?[t.guest]:[]).forEach(p=>{ d+=drinkCt(p)+p.shots; }); });
+  const per=n?d/n:0;
+  return per>=6?3:per>=4?2:per>=2?1:0;
 }
 function drunkify(t){
   const lv=drunkLevel(); if(!lv) return t;
@@ -429,7 +438,7 @@ function newGame(cfg){
   const mk=(n,ps)=>({name:n||'TEAM',score:0,coachUsed:false,players:ps.map(p=>({name:p,shots:0,chugsO:[],chugsD:[]}))});
   S={phase:'game',gname:cfg.gname||new Date().toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}),
      qscores:[[],[]],qbase:[0,0],teams:[mk(cfg.n0,cfg.p0),mk(cfg.n1,cfg.p1)],rot:[0,0],
-     qtr:1,qlen:cfg.qlen,clock:cfg.qlen,canchor:null,running:false,poss:0,opening:0,down:1,defMod:0,
+     guestIn:[false,false],qtr:1,qlen:cfg.qlen,clock:cfg.qlen,canchor:null,running:false,poss:0,opening:0,down:1,defMod:0,
      tol:[3,3],timeout:null,brk:null,evt:{n:0,txt:'',kind:''},
      dphase:'pre',t0:null,pauseE:null,offT:null,defT:null,pend:null,dice:cfg.dice,
      log:[],stats:[freshStats(),freshStats()]};
@@ -444,7 +453,7 @@ function endGame(rec){
   hist.push({date:new Date().toISOString(),gname:S.gname,qscores:S.qscores,log:S.log,
     names:[S.teams[0].name,S.teams[1].name],
     scores:[S.teams[0].score,S.teams[1].score],stats:S.stats,
-    players:S.teams.map(t=>t.players.map(p=>({name:p.name,shots:p.shots,drinks:drinkCt(p),
+    players:S.teams.map(t=>t.players.concat(t.guest&&drinkCt(t.guest)?[t.guest]:[]).map(p=>({name:p.name,shots:p.shots,drinks:drinkCt(p),
       avgO:p.chugsO.length?Math.round(p.chugsO.reduce((a,b)=>a+b,0)/p.chugsO.length):null,
       avgD:p.chugsD.length?Math.round(p.chugsD.reduce((a,b)=>a+b,0)/p.chugsD.length):null})))});
   save(); render();
@@ -506,9 +515,8 @@ function startDrinkTick(){ stopDrinkTick(); tick=setInterval(()=>{ if(!S||S.dpha
 function stopDrinkTick(){ if(tick){clearInterval(tick);tick=null;} }
 function markDef(){ if(S.defT!=null||S.dphase!=='drink'||!canTeam(other(S.poss)))return;
   S.defT=elapsedDrink();
-  const eff=S.defT+S.defMod, nm=drinker(other(S.poss)).name;
-  if(eff<=elapsedDrink()) evt(esc(nm)+' — DEFENSE SUCCESSFUL','good');
-  else evt(esc(nm)+' finished '+fmt(S.defT)+' — defense on if offense passes '+fmt(eff),'');
+  const nm=drinker(other(S.poss)).name;
+  evt(esc(nm)+' — DEFENSE SUCCESSFUL','good');
   log(esc(nm)+' finished the defense drink at '+fmt(S.defT)+'.');
   save(); render(); }
 function markOff(){ if(S.dphase!=='drink'||!canTeam(S.poss))return;
@@ -527,8 +535,7 @@ function evalDown(auto){
   setClockRun(false);
   if(!auto){ drinker(S.poss).chugsO.push(S.offT); S.stats[S.poss].chugsO.push(S.offT); }
   if(S.defT!=null){ drinker(other(S.poss)).chugsD.push(S.defT); S.stats[other(S.poss)].chugsD.push(S.defT); }
-  const defEff=S.defT==null?null:S.defT+S.defMod;
-  const hasDef=defEff!=null && defEff<S.offT;
+  const hasDef=S.defT!=null && S.defT<S.offT;
   if(hasDef) S.stats[other(S.poss)].stops++;
   if(S.offT>=th.b&&auto){
     log('Down '+r+': '+esc(drinker(S.poss).name)+' hit the limit ('+fmt(th.b)+'). Turnover — possession over.');
@@ -558,7 +565,8 @@ function doDigitalRoll(){
   if(!canTeam(rollTeamFor(S.pend)))return;
   const d=$('dieBox'); if(!d)return;
   d.classList.add('rolling','hot');
-  let n=0; const anim=setInterval(()=>{ d.textContent=rollDie(); if(++n>7){clearInterval(anim); d.classList.remove('rolling'); applyRoll(+d.textContent);} },70);
+  let n=0; const anim=setInterval(()=>{ d.textContent=rollDie(); if(++n>16){clearInterval(anim); d.classList.remove('rolling');
+    const v=+d.textContent; setTimeout(()=>applyRoll(v),500);} },100);
 }
 function applyRoll(n){
   const p=S.pend; if(!p)return;
@@ -586,7 +594,7 @@ function resolveDown(out){
     log('TOUCHDOWN — '+T+' +6'+ctx); startPat(S.poss,true); }
   save(); render();
 }
-function nextDown(msg){ stopDrinkTick(); setClockRun(false); S.defMod=0; S.dphase='pre'; S.pend=null; S.t0=null; S.pauseE=null; S.offT=null; S.defT=null;
+function nextDown(msg){ stopDrinkTick(); setClockRun(false); S.defMod=0; S.guestIn=[false,false]; S.dphase='pre'; S.pend=null; S.t0=null; S.pauseE=null; S.offT=null; S.defT=null;
   S.rot[0]++; S.rot[1]++; if(msg)log(msg); save(); render(); }
 function changePoss(){ S.poss=other(S.poss); S.down=1;
   nextDown(S.teams[S.poss].name+' takes over at down 1.'); }
@@ -629,7 +637,7 @@ function resolveBig(id,n){
     S.pend={kind:'sub',sub:'pick6',team:def,prev:'pre'}; save(); render(); return; }
   else if(out==='INT_TO'){ S.stats[off].to++; evt('INTERCEPTION — pick-6 roll coming','bad'); log('INTERCEPTION (rolled 6)! '+S.teams[def].name+' rolls for the pick-6...');
     S.pend={kind:'sub',sub:'pick6',team:def,prev:'pre'}; save(); render(); return; }
-  else if(out==='SACK'){ S.defMod-=60; evt('SACK — def −1:00, strip roll coming','good'); log('SACK (rolled '+n+') — defense −1:00 this down. Rolling for the strip...');
+  else if(out==='SACK'){ S.defMod-=modUnit(); evt('SACK — windows −'+fmt(modUnit())+', strip roll coming','good'); log('SACK (rolled '+n+') — time windows −'+fmt(modUnit())+' this down. Rolling for the strip...');
     S.pend={kind:'sub',sub:'strip',team:def,prev:S.pend.prev}; save(); render(); return; }
   save(); render();
 }
@@ -640,7 +648,7 @@ function resolveSub(n){
     else { evt('No return — rolled '+n,''); log('No return (rolled '+n+').'); changePoss(); }
   } else if(p.sub==='strip'){
     if(ok){ S.stats[S.poss].to++; evt('STRIP SACK — TURNOVER','bad'); log('STRIP SACK (rolled '+n+') — turnover!'); changePoss(); }
-    else { evt('No strip — rolled '+n,''); log('No strip (rolled '+n+'). Play on, defense −1:00.'); resumePlay(p.prev||'pre'); }
+    else { evt('No strip — rolled '+n,''); log('No strip (rolled '+n+'). Play on with tightened windows.'); resumePlay(p.prev||'pre'); }
   }
 }
 
@@ -657,10 +665,10 @@ function startCoach(id){
 function resolveCoach(id,n){
   const c=COACH[id], out=c.map[n], team=S.pend.team;
   if(out==='TO'){ S.stats[S.poss].to++; evt(c.name.toUpperCase()+' BLOWS UP — TURNOVER','bad'); log(c.name+' blows up (rolled 6) — turnover on '+S.teams[S.poss].name+'.'); changePoss(); return; }
-  S.rot[team]++;
-  const nm=esc(drinker(team).name);
-  if(out==='SUB'){ evt(c.name+': new drinker — '+nm,''); log(c.name+' (rolled '+n+'): new '+c.who+' drinker in — '+nm+'.'); }
-  else { S.defMod+=c.mod; evt(c.name+': '+nm+' in, def '+(c.mod>0?'+':'−')+'1:00',''); log(c.name+' (rolled '+n+'): '+nm+' in, defense '+(c.mod>0?'+':'−')+'1:00 this down.'); }
+  S.guestIn[team]=true;
+  const nm=esc(drinker(team).name), mu=fmt(modUnit());
+  if(out==='SUB'){ evt(c.name+': '+nm+' steps in',''); log(c.name+' (rolled '+n+'): '+nm+' drinks this down.'); }
+  else { S.defMod+=(c.mod>0?1:-1)*modUnit(); evt(c.name+': '+nm+' in, windows '+(c.mod>0?'+':'−')+mu,''); log(c.name+' (rolled '+n+'): '+nm+' in, time windows '+(c.mod>0?'+':'−')+mu+' this down.'); }
   S.dphase='pre'; S.pend=null; save(); render();
 }
 function callTimeout(t){
@@ -695,7 +703,7 @@ function resolvePat(n){
 /* ---------- edits (host only) ---------- */
 function editName(i){ if(!isHost())return; const v=prompt('Team name',S.teams[i].name); if(v){S.teams[i].name=v.trim().slice(0,14)||S.teams[i].name; save(); render();} }
 function editScore(i){ if(!isHost())return; const v=prompt('Host override — set score for '+S.teams[i].name,S.teams[i].score); if(v!=null&&!isNaN(+v)){snapshot();S.teams[i].score=Math.max(0,+v);save();render();} }
-function editDown(){ if(!isHost())return; const v=prompt('Set down (1-4)',S.down); if(v&&[1,2,3,4].includes(+v)){snapshot();S.down=+v;save();render();} }
+function editDown(){ if(!isHost())return; const v=prompt('Set downs (1-4)',S.down); if(v&&[1,2,3,4].includes(+v)){snapshot();S.down=+v;save();render();} }
 function flipPoss(){ if(!isHost())return; if(!confirm('Manually flip possession?'))return; snapshot(); S.poss=other(S.poss); S.down=1; nextDown('Possession set to '+S.teams[S.poss].name+' (manual).'); }
 function editClock(){ if(!isHost())return; const v=prompt('Set clock (m:ss)',fmt(effClock())); if(!v)return; const m=v.trim().match(/^(\d+):([0-5]?\d)$/); if(m){snapshot();S.clock=(+m[1]*60)+ +m[2]; if(S.running)S.canchor=now(); save();render();} }
 
@@ -724,7 +732,7 @@ function scoreHTML(){
   return '<header id="scorebar"><div class="sb-row">'+t(0)+
     '<div class="sb-mid"><div class="sb-q">'+(S.brk?'END '+qname(S.qtr):qname(S.qtr))+'</div>'+
     '<div class="sb-clock digits'+(S.running?'':' stopped')+'" id="clk" onclick="toggleClock()" oncontextmenu="event.preventDefault();editClock()">'+fmt(effClock())+'</div>'+
-    '<div class="sb-down" onclick="editDown()">Down '+S.down+' · TOs '+S.tol[0]+'-'+S.tol[1]+'</div></div>'+t(1)+'</div>'+
+    '<div class="sb-down" onclick="editDown()">Downs '+S.down+' · ⏱ '+S.tol[0]+'-'+S.tol[1]+'</div></div>'+t(1)+'</div>'+
     '<div class="sb-tools"><button class="tool" onclick="goHome()">⌂ Home</button>'+
     (isHost()?'<button class="tool" onclick="undo()">↩ Undo</button><button class="tool" onclick="flipPoss()">⇄ Poss</button>':
       '<span class="tool" style="cursor:default">'+(who&&who.role==='player'?esc(who.name):'guest')+'</span>')+
@@ -742,7 +750,7 @@ function pickDrinker(team){
   '<button class="btn ghost sm" onclick="closeSettings()">Cancel</button>';
   $('overlay').classList.add('show');
 }
-function setDrinker(team,i){ if(drinker(team)!==roster(team)[i]){ S.rot[team]=i; log(esc(S.teams[team].name)+': '+esc(roster(team)[i].name)+' steps in to drink.'); } closeSettings(); save(); render(); }
+function setDrinker(team,i){ S.guestIn[team]=false; if(drinker(team)!==roster(team)[i]){ S.rot[team]=i; log(esc(S.teams[team].name)+': '+esc(roster(team)[i].name)+' steps in to drink.'); } closeSettings(); save(); render(); }
 function mapLine(map){
   const names={TO:'TO',FD:'1st',TD:'TD',FG:'FG'};
   const gs=[]; let st=1;
@@ -777,23 +785,22 @@ function stageHTML(){
       '<p class="hint" style="text-align:center;color:var(--amber)">Waiting for '+esc(S.teams[t].name)+' or the host to resume\u2026</p>')+'</div>';
   }
   if(S.dphase==='pre'){
-    return '<div class="card"><h2>Down '+S.down+' — '+off+'</h2>'+drinkline()+
+    return '<div class="card"><h2>Downs '+S.down+' — '+off+'</h2>'+drinkline()+
     bucketTables()+
     '<p class="hint">Fresh drinks up. '+
-    (S.defMod?'<b style="color:var(--amber)">Defense modifier: '+(S.defMod>0?'+':'−')+fmt(Math.abs(S.defMod))+'</b>. ':'')+
-    (S.down===4?'Down 4 — '+fmt(thr(4).b)+' limit, field goal in play. ':'')+
+    (S.defMod?'<b style="color:var(--amber)">Time windows shifted '+(S.defMod>0?'+':'−')+fmt(Math.abs(S.defMod))+'</b> — limits above reflect it. ':'')+
+    (S.down===4?'Downs 4 — '+fmt(thr(4).b)+' limit, field goal in play. ':'')+
     'Clock runs while the drinks are live.</p>'+
     '<button class="btn amber" onclick="startDown()" '+(canTeam(S.poss)?'':'disabled')+'>Start down'+(canTeam(S.poss)?'':' ('+off+' starts)')+'</button></div>';
   }
   if(S.dphase==='drink'){
-    const defOn=S.defT!=null&&(S.defT+S.defMod)<=elapsedDrink();
-    return '<div class="card"><h2>Chug — down '+S.down+'</h2>'+drinkline()+
+    const defOn=S.defT!=null;
+    return '<div class="card"><h2>Chug — downs '+S.down+'</h2>'+drinkline()+
     '<div class="bigtime digits" id="drinkT"'+(S.pauseE!=null?' style="opacity:.45"':'')+'>'+fmt(elapsedDrink())+'</div>'+
     (S.pauseE!=null?'<p class="hint" style="text-align:center;color:var(--amber)">PAUSED</p>':'')+
     bucketTables()+
-    (S.defMod?'<p class="hint" style="text-align:center">Defense effective time '+(S.defMod>0?'+':'−')+fmt(Math.abs(S.defMod))+'</p>':'')+
-    (S.defT!=null?'<p class="hint" style="text-align:center;color:'+(defOn?'var(--td)':'var(--amber)')+'">'+
-      (defOn?'DEFENSE SUCCESSFUL — no touchdown available this down.':esc(drinker(other(S.poss)).name)+' finished '+fmt(S.defT)+' — defense on if offense passes '+fmt(S.defT+S.defMod)+'.')+'</p>':'')+
+    (S.defMod?'<p class="hint" style="text-align:center;color:var(--amber)">Time windows shifted '+(S.defMod>0?'+':'−')+fmt(Math.abs(S.defMod))+' — limits above already reflect it.</p>':'')+
+    (S.defT!=null?'<p class="hint" style="text-align:center;color:var(--td)">DEFENSE SUCCESSFUL at '+fmt(S.defT)+' — no touchdown available.</p>':'')+
     '<div class="btnrow">'+
     '<button class="btn" onclick="markDef()" '+((S.defT==null&&canTeam(other(S.poss)))?'':'disabled')+'>'+esc(drinker(other(S.poss)).name)+' finished</button>'+
     '<button class="btn amber" id="offBtn" onclick="markOff()" '+(canTeam(S.poss)?'':'disabled')+'>'+esc(drinker(S.poss).name)+' finished</button></div>'+
@@ -811,7 +818,7 @@ function describeMap(map){
 function rollHTML(){
   const p=S.pend; let title='',ctx='',map=null,special='';
   const team=rollTeamFor(p), allowed=canTeam(team);
-  if(p.kind==='down'){ title='The roll — down '+S.down;
+  if(p.kind==='down'){ title='The roll — downs '+S.down;
     ctx=(p.defense?'DEFENSE SUCCESSFUL':'No defense')+' · '+(p.bucket==='four'?'made the limit':p.bucket==='fast'?'fast window':'slow window')+' · chug '+fmt(S.offT);
     map=TABLES[p.bucket][p.defense?'def':'no']; }
   else if(p.kind==='big'){ title=BIG[p.id].name; ctx='Big play — shot taken, everything paused'; map=BIG[p.id].map; }
@@ -853,9 +860,10 @@ function chipsHTML(){
   '</div></div>';
 }
 function logHTML(){
-  const anncr=['Play-by-play','Play-by-play (couple in)','Playby-play (getting loose)','PLAYBYPLAY (announcer is gone)'][drunkLevel()];
-  return '<details open><summary>'+anncr+'</summary>'+
-  (S.log.length?S.log.map(l=>'<div class="logline"><span class="lt">'+qname(l.q)+' '+l.t+'</span>'+l.txt+'</div>').join(''):'<div class="logline hint">No plays yet.</div>')+
+  const anncr=soberMode()?'Play-by-play (sober feed)':['Play-by-play','Play-by-play (couple in)','Playby-play (getting loose)','PLAYBYPLAY (announcer is gone)'][drunkLevel()];
+  return '<details open><summary>'+anncr+
+  ' <button class="tool" style="float:right" onclick="event.preventDefault();event.stopPropagation();toggleSober()">'+(soberMode()?'🍺 drunk feed':'😐 sober feed')+'</button></summary>'+
+  (S.log.length?S.log.map(l=>'<div class="logline"><span class="lt">'+qname(l.q)+' '+l.t+'</span>'+logLine(l)+'</div>').join(''):'<div class="logline hint">No plays yet.</div>')+
   '</details>';
 }
 function statTable(names,stats){
@@ -864,9 +872,10 @@ function statTable(names,stats){
 }
 function playerTable(){
   let rows='';
-  S.teams.forEach(t=>t.players.forEach(p=>{
+  S.teams.forEach(t=>{ const ps=t.players.concat(t.guest&&drinkCt(t.guest)?[t.guest]:[]);
+    ps.forEach(p=>{
     rows+='<tr><td>'+esc(p.name)+' <span style="color:var(--muted)">('+esc(t.name)+')</span></td><td>'+drinkCt(p)+'</td><td>'+avgT(p.chugsO)+'</td><td>'+avgT(p.chugsD)+'</td><td>'+p.shots+'</td></tr>';
-  }));
+  });});
   return '<table class="statgrid"><tr><th>Player</th><th>Drinks</th><th>Avg O</th><th>Avg D</th><th>Shots</th></tr>'+rows+'</table>';
 }
 function statsHTML(){
@@ -898,13 +907,13 @@ function rulesBody(){
   return '<div class="ref">'+
   '<h3>How the game works</h3><p>Two teams, two or more drinkers each. Every down the offense and defense drinker each chug — a race. If the defense finishes first, Defense odds apply and no touchdown is possible. The offense\u2019s time picks the odds column, a d6 decides the play. A first down advances you a row: a fresh set of downs with tighter times. Turnover or score ends the possession and the opponent restarts at down 1. Everyone refills and rotates after every roll. Clock runs only while drinks are live. Highest score after four quarters wins; halftime flips who receives.</p>'+
   '<p>Times below assume 15:00 quarters — shorter quarters scale every limit proportionally (10:00 \u2192 \u00d7\u2154; live values always show on the down card).</p>'+
-  '<table><tr><th>Down</th><th>Left table</th><th>Right table</th><th>Auto TO</th></tr>'+
+  '<table><tr><th>Downs</th><th>Left table</th><th>Right table</th><th>Auto TO</th></tr>'+
   '<tr><td>1</td><td>&lt;4:00</td><td>4–6</td><td>&gt;6:00</td></tr><tr><td>2</td><td>&lt;3:00</td><td>3–5</td><td>&gt;5:00</td></tr>'+
   '<tr><td>3</td><td>&lt;2:00</td><td>2–4</td><td>&gt;4:00</td></tr><tr><td>4</td><td colspan="2">&lt;1:30 (FG live)</td><td>&gt;1:30</td></tr></table>'+
   '<p>Hitting the auto-TO limit ends the possession instantly — no roll.</p>'+
   '<h3>Left table</h3><table><tr><th></th><th>TO</th><th>1st</th><th>TD</th></tr><tr><td>No def</td><td>1</td><td>2–3</td><td>4–6</td></tr><tr><td>Defense</td><td>1–2</td><td>3–6</td><td>✕</td></tr></table>'+
   '<h3>Right table</h3><table><tr><th></th><th>TO</th><th>1st</th><th>TD</th></tr><tr><td>No def</td><td>1–2</td><td>3–4</td><td>5–6</td></tr><tr><td>Defense</td><td>1–3</td><td>4–6</td><td>✕</td></tr></table>'+
-  '<h3>Down 4</h3><table><tr><th></th><th>TO</th><th>1st</th><th>FG</th><th>TD</th></tr><tr><td>No def</td><td>1</td><td>2</td><td>3–4</td><td>5–6</td></tr><tr><td>Defense</td><td>1–3</td><td>4–5</td><td>6</td><td>✕</td></tr></table>'+
+  '<h3>Downs 4</h3><table><tr><th></th><th>TO</th><th>1st</th><th>FG</th><th>TD</th></tr><tr><td>No def</td><td>1</td><td>2</td><td>3–4</td><td>5–6</td></tr><tr><td>Defense</td><td>1–3</td><td>4–5</td><td>6</td><td>✕</td></tr></table>'+
   '<h3>Big plays (player takes a shot; everything pauses)</h3>'+
   '<table><tr><th style="text-align:left">Play</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th></tr>'+
   bigRow('Hail Mary',BIG.hail.map,'offense')+bigRow('4th Down',BIG.fourth.map,'offense')+
@@ -946,7 +955,7 @@ function openGameDetail(i){
   '<h3>Team stats</h3>'+statTable(g.names,g.stats)+
   (pl?'<h3>Players</h3><table class="statgrid"><tr><th>Player</th><th>Drinks</th><th>Avg O</th><th>Avg D</th><th>Shots</th></tr>'+pl+'</table>':'')+
   '</div>'+
-  (g.log&&g.log.length?'<details><summary>Play-by-play ('+g.log.length+')</summary>'+g.log.map(l=>'<div class="logline"><span class="lt">'+qname(l.q)+' '+l.t+'</span>'+l.txt+'</div>').join('')+'</details>':'')+
+  (g.log&&g.log.length?'<details><summary>Play-by-play ('+g.log.length+') — '+(soberMode()?'sober':'as heard')+'</summary>'+g.log.map(l=>'<div class="logline"><span class="lt">'+qname(l.q)+' '+l.t+'</span>'+logLine(l)+'</div>').join('')+'</details>':'')+
   '<div class="btnrow"><button class="btn sm" onclick="openHistory()">← All games</button><button class="btn ghost sm" onclick="closeSettings()">Close</button></div>';
 }
 
@@ -983,7 +992,7 @@ function launch(){
   newGame({gname:$('gname').value.trim(),n0:$('n0').value,n1:$('n1').value,p0,p1,qlen:+$('qlen').value,dice:window._dice||'digital'});
 }
 function segDice(v){ window._dice=v; $('dg').classList.toggle('on',v==='digital'); $('dm').classList.toggle('on',v==='manual'); }
-function resumeGame(){ S=JSON.parse(localStorage.getItem(LSK)); S.running=false; S.canchor=null; shownEvt=(S.evt&&S.evt.n)||0; render(); }
+function resumeGame(){ S=JSON.parse(localStorage.getItem(LSK)); if(!S.guestIn)S.guestIn=[false,false]; S.running=false; S.canchor=null; shownEvt=(S.evt&&S.evt.n)||0; render(); }
 function finalHTML(){
   const [a,b]=S.teams; const w=a.score===b.score?null:(a.score>b.score?a:b);
   return '<div class="hero"><div class="eyebrow">Final'+(S.qtr>4?' · OT':'')+'</div><h1>'+esc(a.name)+' vs '+esc(b.name)+'</h1></div>'+
