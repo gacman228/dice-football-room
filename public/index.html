@@ -316,7 +316,13 @@ function connectRoom(code){
       localStorage.setItem(LSK,JSON.stringify(S));
       R.applying=false; render();
       if(first&&!myRole()) openWhoPicker(); } };
-  ws.onclose=()=>{ if(R.ws===ws)R.ws=null; clearInterval(R.pinger); render();
+  ws.onclose=ev=>{ if(R.ws===ws)R.ws=null; clearInterval(R.pinger);
+    if(ev&&ev.reason==='room closed'){
+      const wasCode=R.code; R.code=null; R.seq=0; clearTimeout(R.retry);
+      if(S)evt('ROOM '+wasCode+' CLOSED BY ADMIN','bad');
+      alert('The admin closed room '+wasCode+'. You are now playing locally on this phone only.');
+      render(); return; }
+    render();
     if(R.code){ clearTimeout(R.retry); R.retry=setTimeout(()=>connectRoom(R.code),2500); } };
   ws.onerror=()=>{};
 }
@@ -382,7 +388,7 @@ function joinByCode(){ const c=prompt('Room code'); if(!c)return; closeSettings(
 function closeRoom(code){ const k=adminKey(); if(!k)return;
   if(!confirm('Close room '+code+'? Its game state is wiped for everyone.'))return;
   fetch(R.url+'/room/'+code+'?key='+encodeURIComponent(k),{method:'DELETE'})
-    .then(r=>{ if(r.status===403){localStorage.removeItem('dfb_admin');alert('Wrong admin key.');} joinRoom(); })
+    .then(r=>{ if(r.status===403){localStorage.removeItem('dfb_admin');alert('Wrong admin key.');} joinRoom(); loadLobbyInto('homeLobby'); })
     .catch(e=>alert('Could not reach the room server.')); }
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden){
   if(R.code&&(!R.ws||R.ws.readyState>1))connectRoom(R.code);
@@ -1027,6 +1033,7 @@ $('overlay').addEventListener('click',e=>{ if(e.target.id==='overlay')closeSetti
   try{ hist=JSON.parse(localStorage.getItem(LSH))||[]; }catch(e){ hist=[]; }
   S=null; render();
   if(localStorage.getItem('dfb_awake')) setAwake(true);
+  setInterval(()=>{ if((!S||S.phase==='setup')&&!document.hidden) loadLobbyInto('homeLobby'); },10000);
 })();
 </script>
 </body>
