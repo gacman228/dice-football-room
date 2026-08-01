@@ -99,9 +99,12 @@ export default {
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors });
 
     const lobby = () => env.LOBBY.get(env.LOBBY.idFromName('lobby'));
-    const isAdmin = () => {
-      const k = url.searchParams.get('key');
-      return !env.ADMIN_KEY || (k && k === env.ADMIN_KEY); // open until the secret is configured
+    const key = url.searchParams.get('key');
+    const isAdmin = () => !env.ADMIN_KEY || (key && key === env.ADMIN_KEY); // open until the secret is configured
+    const isHost = () => {
+      if (isAdmin()) return true;
+      const hosts = (env.HOST_KEYS || '').split(',').map(x => x.trim()).filter(Boolean);
+      return key && hosts.includes(key);
     };
 
     if (url.pathname === '/rooms') {
@@ -110,7 +113,7 @@ export default {
     }
 
     if (url.pathname === '/new') {
-      if (!isAdmin()) return new Response('admin key required', { status: 403, headers: cors });
+      if (!isHost()) return new Response('host key required', { status: 403, headers: cors });
       const alpha = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
       const code = Array.from({ length: 5 }, () => alpha[Math.floor(Math.random() * alpha.length)]).join('');
       await lobby().fetch('https://lobby/', { method: 'POST', body: JSON.stringify({ code, gname: '(new room)', names: [], scores: [], updated: Date.now() }) });
