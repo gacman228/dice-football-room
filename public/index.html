@@ -336,7 +336,7 @@ function goHome(){
     if(R.ws){ const w=R.ws; R.ws=null; try{w.close();}catch(e){} } R.seq=0; }
   S=null; closeSettings(); render(); }
 function adminKey(){ let k=localStorage.getItem('dfb_admin');
-  if(!k){ k=prompt('Admin key (room creation is admin-only)'); if(!k)return null; k=k.trim(); localStorage.setItem('dfb_admin',k); }
+  if(!k){ k=prompt('Host key (creating rooms requires one — ask Paul)'); if(!k)return null; k=k.trim(); localStorage.setItem('dfb_admin',k); }
   return k; }
 function newRoomCode(u,then){
   const k=adminKey(); if(!k)return;
@@ -388,7 +388,7 @@ function joinByCode(){ const c=prompt('Room code'); if(!c)return; closeSettings(
 function closeRoom(code){ const k=adminKey(); if(!k)return;
   if(!confirm('Close room '+code+'? Its game state is wiped for everyone.'))return;
   fetch(R.url+'/room/'+code+'?key='+encodeURIComponent(k),{method:'DELETE'})
-    .then(r=>{ if(r.status===403){localStorage.removeItem('dfb_admin');alert('Wrong admin key.');} joinRoom(); loadLobbyInto('homeLobby'); })
+    .then(r=>{ if(r.status===403)alert('Only the admin key can close rooms.'); joinRoom(); loadLobbyInto('homeLobby'); })
     .catch(e=>alert('Could not reach the room server.')); }
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden){
   if(R.code&&(!R.ws||R.ws.readyState>1))connectRoom(R.code);
