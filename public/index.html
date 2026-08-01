@@ -200,6 +200,12 @@ summary::-webkit-details-marker{display:none}
 .finalscore{font-family:var(--mono);font-size:2.6rem;font-weight:800;text-align:center;margin:8px 0}
 .winner{text-align:center;color:var(--td);font-weight:800;letter-spacing:.1em;text-transform:uppercase;font-size:.9rem}
 .notice{font-size:.75rem;color:var(--muted);text-align:center;margin-top:10px;line-height:1.5}
+.splash{position:fixed;top:36%;left:50%;transform:translate(-50%,-50%);background:rgba(9,20,13,.96);border:2px solid var(--amber);border-radius:18px;padding:20px 28px;font-size:1.35rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;z-index:80;text-align:center;max-width:86vw;box-shadow:0 10px 40px rgba(0,0,0,.6);animation:pop .25s}
+.splash.bad{border-color:var(--red);color:var(--red)}
+.splash.good{border-color:var(--td);color:var(--td)}
+.splash.out{opacity:0;transition:opacity .4s}
+@keyframes pop{from{transform:translate(-50%,-50%) scale(.72);opacity:0}}
+button.btn:disabled,.chip:disabled{opacity:.32;pointer-events:none}
 @media (orientation:landscape) and (min-width:640px){
   #app{max-width:960px}
   .gamecols{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:12px;align-items:start}
@@ -217,12 +223,13 @@ summary::-webkit-details-marker{display:none}
 <div id="app"></div>
 <div id="overlay"><div id="sheet"></div></div>
 <script>
-/* ============ Dice Football v2 ============
-   Rows = consecutive possessions without scoring (resets on your score).
-   Chug time picks the column/table. Defense-first picks the table row.
-   First down: keep ball, refill, rotate drinkers, chug again (same row).
+/* ============ Dice Football v3 ============
+   Rows = downs. A first down advances one row (tighter times = a new set of
+   downs). Turnover or score ends the possession; opponent restarts at down 1.
+   Roles in online rooms: host controls everything; players control their team;
+   guests watch. Clock runs only while a chug is live.
 ========================================== */
-const LSK='dfb_state_v2', LSH='dfb_hist_v2';
+const LSK='dfb_state_v3', LSH='dfb_hist_v2';
 const THRESH={1:{a:240,b:360},2:{a:180,b:300},3:{a:120,b:240},4:{a:90,b:90}}; // at 15:00 quarters
 function thr(r){ const f=(S&&S.qlen?S.qlen:900)/900; const t=THRESH[r]; return {a:t.a*f,b:t.b*f}; }
 const TABLES={
@@ -241,8 +248,9 @@ const COACH={
   blitz:  {name:'Blitz',   map:{1:'SUB',2:'SUB',3:'SUB',4:'SUBMOD',5:'SUBMOD',6:'TO'}, mod:-60, who:'defense'}
 };
 const SUB_SUCCESS=[4,5,6];
+const DEFAULT_SERVER='https://dice-football-room.pflegac.workers.dev';
 
-let S=null, hist=[], snaps=[], tick=null, clockTick=null;
+let S=null, hist=[], snaps=[], tick=null, clockTick=null, shownEvt=0, wakeLock=null;
 const R={url:localStorage.getItem('dfb_server')||'',code:null,ws:null,seq:0,applying:false,hosting:false,retry:null,pinger:null};
 
 /* ---------- helpers ---------- */
@@ -254,15 +262,39 @@ const other=i=>1-i;
 const now=()=>Date.now()/1000;
 const elapsedDrink=()=>S.pauseE!=null?S.pauseE:(S.t0?now()-S.t0:0);
 const effClock=()=>S&&S.running&&S.canchor?Math.max(0,S.clock-(now()-S.canchor)):(S?S.clock:0);
-const row=()=>Math.min(4,Math.max(1,S.pc[S.poss]));
 const roster=i=>S.teams[i].players;
 const drinker=i=>roster(i)[S.rot[i]%roster(i).length];
 function freshStats(){return {td:0,fg:0,to:0,fd:0,shots:0,coach:0,chugsO:[],chugsD:[],stops:0}}
 const avgT=c=>c&&c.length?fmt(c.reduce((a,b)=>a+b,0)/c.length):'—';
-const drinkCt=p=>((p.chugsO||p.chugs||[]).length+(p.chugsD||[]).length);
+const drinkCt=p=>((p.chugsO||[]).length+(p.chugsD||[]).length);
+function evt(txt,kind){ if(!S)return; S.evt={n:((S.evt&&S.evt.n)||0)+1,txt,kind:kind||''}; }
+function snapshot(){ snaps.push(JSON.stringify(S)); if(snaps.length>30)snaps.shift(); }
+function undo(){ if(!isHost()||!snaps.length)return; S=JSON.parse(snaps.pop()); shownEvt=(S.evt&&S.evt.n)||0;
+  stopDrinkTick(); if(S.dphase==='drink'&&S.t0&&S.pauseE==null)startDrinkTick(); render(); }
+
+/* ---------- roles ---------- */
+function myRole(){ if(!R.code)return {role:'host'};
+  try{ return JSON.parse(localStorage.getItem('dfb_who_'+R.code))||null; }catch(e){ return null; } }
+function isHost(){ const w=myRole(); return !R.code||(w&&w.role==='host'); }
+function canTeam(t){ const w=myRole(); return isHost()||(w&&w.role==='player'&&w.team===t); }
+function setWho(role,team,idx){
+  const v=role==='player'?{role:'player',team,name:roster(team)[idx].name}:{role};
+  localStorage.setItem('dfb_who_'+R.code,JSON.stringify(v)); closeSettings(); render(); }
+function openWhoPicker(){
+  if(!R.code||!S||myRole())return;
+  const sh=$('sheet');
+  sh.innerHTML='<h2>Who are you?</h2><p class="hint">Players control their own team. Guests watch.</p>'+
+  [0,1].map(t=>'<div class="eyebrow" style="margin:10px 0 2px">'+esc(S.teams[t].name)+'</div>'+
+    roster(t).map((p,i)=>'<button class="pickbtn" onclick="setWho(\'player\','+t+','+i+')">'+esc(p.name)+'</button>').join('')).join('')+
+  '<button class="pickbtn" style="margin-top:12px" onclick="setWho(\'guest\')">Guest — view only</button>'+
+  (localStorage.getItem('dfb_admin')?'<button class="pickbtn" onclick="setWho(\'host\')">Host — full control</button>':'');
+  $('overlay').classList.add('show');
+}
+
+/* ---------- persistence & sync ---------- */
 function save(){ if(S) localStorage.setItem(LSK,JSON.stringify(S)); localStorage.setItem(LSH,JSON.stringify(hist)); roomSend(); }
+function log(txt){ S.log.unshift({q:S.qtr,t:fmt(effClock()),txt:drunkify(txt)}); if(S.log.length>500)S.log.pop(); }
 function roomSend(){ if(!R.applying && R.ws && R.ws.readyState===1 && S && S.phase!=='setup') R.ws.send(JSON.stringify({type:'state',state:S})); }
-const DEFAULT_SERVER='https://dice-football-room.pflegac.workers.dev';
 function serverURL(){
   if(!R.url){ R.url = /^https?:$/.test(location.protocol) ? location.origin : DEFAULT_SERVER;
     localStorage.setItem('dfb_server',R.url); }
@@ -276,11 +308,14 @@ function connectRoom(code){
     clearInterval(R.pinger); R.pinger=setInterval(()=>{ try{ws.send('{"type":"ping"}');}catch(e){} },30000); render(); };
   ws.onmessage=ev=>{ let m; try{m=JSON.parse(ev.data);}catch(e){return;}
     if(m.type==='state'&&m.seq>R.seq&&m.state){
+      const first=R.seq===0;
       R.seq=m.seq; R.applying=true; S=m.state;
-      stopDrinkTick(); if(S.dphase==='drink'&&S.t0&&S.pauseE==null)startDrinkTick();
+      if(first) shownEvt=(S.evt&&S.evt.n)||0;
+      stopDrinkTick(); if(S.dphase==='drink'&&S.t0&&S.pauseE==null&&!S.timeout)startDrinkTick();
       stopClock(); if(S.running)startClock();
       localStorage.setItem(LSK,JSON.stringify(S));
-      R.applying=false; render(); } };
+      R.applying=false; render();
+      if(first&&!myRole()) openWhoPicker(); } };
   ws.onclose=()=>{ if(R.ws===ws)R.ws=null; clearInterval(R.pinger); render();
     if(R.code){ clearTimeout(R.retry); R.retry=setTimeout(()=>connectRoom(R.code),2500); } };
   ws.onerror=()=>{};
@@ -288,9 +323,8 @@ function connectRoom(code){
 function leaveRoom(){ R.code=null; clearTimeout(R.retry); clearInterval(R.pinger);
   if(R.ws){ const w=R.ws; R.ws=null; try{w.close();}catch(e){} } R.seq=0; closeSettings(); render(); }
 function goHome(){
-  if(S&&S.phase==='game'){ if(S.running){ S.clock=effClock(); S.canchor=null; S.running=false; }
-    if(S.dphase==='drink'&&S.t0!=null&&S.pauseE==null){ S.pauseE=now()-S.t0; }
-    save(); }
+  if(S&&S.phase==='game'){ setClockRun(false);
+    if(S.dphase==='drink'&&S.t0!=null&&S.pauseE==null){ S.pauseE=now()-S.t0; } save(); }
   stopClock(); stopDrinkTick();
   if(R.code){ R.code=null; clearTimeout(R.retry); clearInterval(R.pinger);
     if(R.ws){ const w=R.ws; R.ws=null; try{w.close();}catch(e){} } R.seq=0; }
@@ -307,20 +341,17 @@ function newRoomCode(u,then){
 }
 function hostRoom(fromSetup){
   const u=serverURL(); if(!u)return;
+  const go=d=>{ R.hosting=true; connectRoom(d.code);
+    localStorage.setItem('dfb_who_'+d.code.toUpperCase(),JSON.stringify({role:'host'}));
+    alert('Room '+d.code+' is live.\nFriends: open the app and pick it from Games in progress.'); };
   if(fromSetup){
     const parse=v=>v.split(',').map(x=>x.trim()).filter(Boolean).slice(0,12);
     const p0=parse($('p0').value), p1=parse($('p1').value);
     if(p0.length<2||p1.length<2){alert('Each team needs at least 2 players.');return;}
     newRoomCode(u,d=>{
       newGame({gname:$('gname').value.trim(),n0:$('n0').value,n1:$('n1').value,p0,p1,qlen:+$('qlen').value,dice:window._dice||'digital'});
-      R.hosting=true; connectRoom(d.code);
-      alert('Room '+d.code+' is live.\nFriends: open the app, tap Join room, and pick it from the list.');
-    });
-  } else {
-    newRoomCode(u,d=>{ R.hosting=true; connectRoom(d.code); closeSettings();
-      alert('Room '+d.code+' is live.\nFriends: open the app, tap Join room, and pick it from the list.');
-    });
-  }
+      go(d); });
+  } else newRoomCode(u,d=>{ go(d); closeSettings(); });
 }
 function roomRows(list){
   const adm=!!localStorage.getItem('dfb_admin');
@@ -353,9 +384,16 @@ function closeRoom(code){ const k=adminKey(); if(!k)return;
   fetch(R.url+'/room/'+code+'?key='+encodeURIComponent(k),{method:'DELETE'})
     .then(r=>{ if(r.status===403){localStorage.removeItem('dfb_admin');alert('Wrong admin key.');} joinRoom(); })
     .catch(e=>alert('Could not reach the room server.')); }
-function setServer(){ const v=prompt('Room server URL',R.url||'https://'); if(v==null)return;
-  R.url=v.trim().replace(/\/+$/,''); localStorage.setItem('dfb_server',R.url); }
-document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&R.code&&(!R.ws||R.ws.readyState>1))connectRoom(R.code); });
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden){
+  if(R.code&&(!R.ws||R.ws.readyState>1))connectRoom(R.code);
+  if(localStorage.getItem('dfb_awake'))setAwake(true); }});
+async function setAwake(on){
+  localStorage.setItem('dfb_awake',on?'1':'');
+  if(on){ try{ wakeLock=await navigator.wakeLock.request('screen'); }catch(e){ if(!document.hidden)alert('Keep-awake not supported in this browser.'); } }
+  else if(wakeLock){ try{wakeLock.release();}catch(e){} wakeLock=null; }
+}
+
+/* ---------- drunk announcer ---------- */
 function drunkLevel(){
   if(!S||!S.teams[0].players) return 0;
   let d=0; S.teams.forEach(t=>t.players.forEach(p=>{ d+=drinkCt(p)+p.shots; }));
@@ -363,42 +401,40 @@ function drunkLevel(){
 }
 function drunkify(t){
   const lv=drunkLevel(); if(!lv) return t;
-  const R=Math.random;
+  const Rn=Math.random;
   let out=t.split(' ').map(w=>{
     if(w.includes('&')||w.includes(';')||w.includes('#')) return w;
     let x=w;
-    if(lv>=1&&R()<.10) x=x.replace(/s/g,'sh').replace(/S/g,'Sh');
-    if(lv>=2&&R()<.14&&x.length>2){ const i=1+Math.floor(R()*(x.length-1)); x=x.slice(0,i)+x[i-1]+x.slice(i); }
-    if(lv>=3&&R()<.16&&x.length>4){ const m=x.slice(1,-1).split(''); for(let i=m.length-1;i>0;i--){const j=Math.floor(R()*(i+1)); const tmp=m[i]; m[i]=m[j]; m[j]=tmp;} x=x[0]+m.join('')+x[x.length-1]; }
+    if(lv>=1&&Rn()<.10) x=x.replace(/s/g,'sh').replace(/S/g,'Sh');
+    if(lv>=2&&Rn()<.14&&x.length>2){ const i=1+Math.floor(Rn()*(x.length-1)); x=x.slice(0,i)+x[i-1]+x.slice(i); }
+    if(lv>=3&&Rn()<.16&&x.length>4){ const m=x.slice(1,-1).split(''); for(let i=m.length-1;i>0;i--){const j=Math.floor(Rn()*(i+1)); const tmp=m[i]; m[i]=m[j]; m[j]=tmp;} x=x[0]+m.join('')+x[x.length-1]; }
     return x;
   }).join(' ');
   if(lv>=2) out=out.replace(/\.$/,'...').replace(/!/g,'!!');
-  const tails={1:[' *hic*'],
-               2:[' *hic*',' lesh gooo',' ok ok ok'],
-               3:[' *hic* *hic*',' WAIT WHO HASH THE BALL',' i love thish game',' whered my drink go',' iss fine issfine']};
-  if(R()<(lv===1?.2:lv===2?.3:.4)) out+=tails[lv][Math.floor(R()*tails[lv].length)];
-  if(lv>=3&&R()<.2&&!out.includes('&')) out=out.toUpperCase();
+  const tails={1:[' *hic*'],2:[' *hic*',' lesh gooo',' ok ok ok'],
+    3:[' *hic* *hic*',' WAIT WHO HASH THE BALL',' i love thish game',' whered my drink go',' iss fine issfine']};
+  if(Rn()<(lv===1?.2:lv===2?.3:.4)) out+=tails[lv][Math.floor(Rn()*tails[lv].length)];
+  if(lv>=3&&Rn()<.2&&!out.includes('&')) out=out.toUpperCase();
   return out;
 }
-function log(txt){ S.log.unshift({q:S.qtr,t:fmt(effClock()),txt:drunkify(txt)}); if(S.log.length>500)S.log.pop(); }
-function snapshot(){ snaps.push(JSON.stringify(S)); if(snaps.length>30)snaps.shift(); }
-function undo(){ if(!snaps.length)return; S=JSON.parse(snaps.pop()); stopDrinkTick(); if(S.dphase==='drink'&&S.t0)startDrinkTick(); render(); }
 
 /* ---------- lifecycle ---------- */
 function newGame(cfg){
   const mk=(n,ps)=>({name:n||'TEAM',score:0,coachUsed:false,players:ps.map(p=>({name:p,shots:0,chugsO:[],chugsD:[]}))});
   S={phase:'game',gname:cfg.gname||new Date().toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}),
-     qscores:[[],[]],qbase:[0,0],teams:[mk(cfg.n0,cfg.p0),mk(cfg.n1,cfg.p1)],rot:[0,0],pc:[1,0],
-     qtr:1,qlen:cfg.qlen,clock:cfg.qlen,canchor:null,running:false,poss:0,downNum:1,defMod:0,
+     qscores:[[],[]],qbase:[0,0],teams:[mk(cfg.n0,cfg.p0),mk(cfg.n1,cfg.p1)],rot:[0,0],
+     qtr:1,qlen:cfg.qlen,clock:cfg.qlen,canchor:null,running:false,poss:0,opening:0,down:1,defMod:0,
+     tol:[3,3],timeout:null,brk:null,evt:{n:0,txt:'',kind:''},
      dphase:'pre',t0:null,pauseE:null,offT:null,defT:null,pend:null,dice:cfg.dice,
      log:[],stats:[freshStats(),freshStats()]};
-  snaps=[]; log('Kickoff — '+S.teams[0].name+' ball, possession #1. Tap the clock to run it.');
+  snaps=[]; shownEvt=0;
+  log('Kickoff — '+S.teams[0].name+' ball, down 1. Clock runs while drinks are live.');
   save(); render();
 }
 function recordQuarter(){ [0,1].forEach(i=>S.qscores[i].push(S.teams[i].score-S.qbase[i])); S.qbase=[S.teams[0].score,S.teams[1].score]; }
 function endGame(rec){
   if(rec){ S.clock=effClock(); recordQuarter(); }
-  S.phase='final'; S.running=false; S.canchor=null; stopClock();
+  S.phase='final'; S.running=false; S.canchor=null; S.brk=null; S.timeout=null; stopClock(); stopDrinkTick();
   hist.push({date:new Date().toISOString(),gname:S.gname,qscores:S.qscores,log:S.log,
     names:[S.teams[0].name,S.teams[1].name],
     scores:[S.teams[0].score,S.teams[1].score],stats:S.stats,
@@ -408,64 +444,92 @@ function endGame(rec){
   save(); render();
 }
 function endQuarter(){
-  S.clock=effClock(); S.running=false; S.canchor=null; stopClock(); recordQuarter();
-  if(S.qtr>=4 && S.teams[0].score!==S.teams[1].score){ endGame(false); return; }
-  S.qtr++; S.clock=S.qlen; S.canchor=null; S.teams.forEach(t=>t.coachUsed=false);
-  log((S.qtr>4?'Tied — overtime! ':'End of '+qname(S.qtr-1)+'. ')+'Coaching decisions reset.');
+  setClockRun(false); S.clock=0; recordQuarter();
+  stopDrinkTick();
+  if(S.dphase!=='pre') log('Quarter ended mid-down — the down is void, no roll.');
+  S.pend=null; S.t0=null; S.pauseE=null; S.offT=null; S.defT=null; S.defMod=0; S.dphase='pre'; S.timeout=null;
+  if(S.qtr>=4 && S.teams[0].score!==S.teams[1].score){ evt('FINAL',''); endGame(false); return; }
+  S.brk={next:S.qtr+1}; S.clock=S.qlen;
+  evt('END OF '+qname(S.qtr),''); log('End of '+qname(S.qtr)+' — waiting for the host to start '+qname(S.qtr+1)+'.');
+  save(); render();
+}
+function startQuarter(){
+  if(!isHost()||!S.brk)return;
+  const n=S.brk.next;
+  S.qtr=n; S.brk=null; S.canchor=null; S.running=false; S.clock=S.qlen;
+  S.teams.forEach(t=>t.coachUsed=false);
+  if(n===3){ S.poss=other(S.opening); S.down=1; S.tol=[3,3]; S.defMod=0;
+    log('Second half — halftime switch: '+S.teams[S.poss].name+' now on offense. Timeouts reset to 3.'); }
+  else log(qname(n)+' underway. Coaching decisions reset.');
+  evt(qname(n)+(n>4?' — OVERTIME':''),'');
   save(); render();
 }
 
-/* ---------- clock ---------- */
-function toggleClock(){ if(S.phase!=='game')return;
-  if(!S.running){ S.running=true; S.canchor=now(); startClock();
-    if(S.dphase==='drink'&&S.pauseE!=null){ S.t0=now()-S.pauseE; S.pauseE=null; startDrinkTick(); } }
-  else { S.clock=effClock(); S.canchor=null; S.running=false; stopClock();
-    if(S.dphase==='drink'&&S.t0!=null&&S.pauseE==null){ S.pauseE=now()-S.t0; stopDrinkTick(); } }
-  save(); render(); }
+/* ---------- clock (auto: runs only while a chug is live) ---------- */
+function setClockRun(on){
+  if(on&&!S.running){ S.running=true; S.canchor=now(); startClock(); }
+  else if(!on&&S.running){ S.clock=effClock(); S.canchor=null; S.running=false; stopClock(); }
+}
+function toggleClock(){ if(S.phase!=='game'||!isHost())return; setClockRun(!S.running); save(); render(); }
 function startClock(){ stopClock();
   clockTick=setInterval(()=>{ if(!S||!S.running){stopClock();return;}
     const e=effClock();
-    if(e<=0){ S.clock=0; S.canchor=null; endQuarter(); return; }
+    if(e<=0){ endQuarter(); return; }
     const el=$('clk'); if(el)el.textContent=fmt(e);
   },250);
 }
 function stopClock(){ if(clockTick){clearInterval(clockTick);clockTick=null;} }
 
 /* ---------- drink race ---------- */
-function startDown(){ snapshot(); if(!S.running){ S.running=true; S.canchor=now(); startClock(); } S.dphase='drink'; S.t0=now(); S.pauseE=null; S.offT=null; S.defT=null; startDrinkTick(); save(); render(); }
-function startDrinkTick(){ stopDrinkTick(); tick=setInterval(()=>{ const el=$('drinkT'); if(!el)return;
-  const e=now()-S.t0; el.textContent=fmt(e);
-  const th=thr(row()), r=row();
+function startDown(){ if(!canTeam(S.poss))return;
+  snapshot(); S.dphase='drink'; S.t0=now(); S.pauseE=null; S.offT=null; S.defT=null;
+  setClockRun(true); startDrinkTick(); save(); render(); }
+function startDrinkTick(){ stopDrinkTick(); tick=setInterval(()=>{ if(!S||S.dphase!=='drink'||S.pauseE!=null)return;
+  const el=$('drinkT'); if(!el)return;
+  const e=elapsedDrink(), th=thr(S.down), r=S.down;
+  el.textContent=fmt(e);
   el.classList.toggle('over',e>th.b);
-  const b0=$('bt0'), b1=$('bt1'), ov=$('btOver');
+  if(e>th.b){ S.offT=th.b; stopDrinkTick(); evt('OVER THE LIMIT — TURNOVER','bad'); evalDown(true); return; }
+  const b0=$('bt0'), b1=$('bt1');
   if(b0){
-    const over=e>th.b;
-    if(r===4){ b0.classList.toggle('live',!over); b0.classList.toggle('deadzone',over); }
+    if(r===4){ b0.classList.toggle('live',true); }
     else{ b0.classList.toggle('live',e<th.a); b0.classList.toggle('deadzone',e>=th.a);
-          if(b1){ b1.classList.toggle('live',e>=th.a&&!over); b1.classList.toggle('deadzone',over); } }
-    if(ov) ov.style.color=over?'#fff':'';
+          if(b1){ b1.classList.toggle('live',e>=th.a); } }
   }
-  const ob=$('offBtn'); if(ob) ob.textContent = e>th.b ? 'Over the limit — turnover' : (esc(drinker(S.poss).name)+' finished');
 },200); }
 function stopDrinkTick(){ if(tick){clearInterval(tick);tick=null;} }
-function markDef(){ if(S.defT!=null)return; S.defT=elapsedDrink(); render(); }
-function markOff(){ S.offT=elapsedDrink(); stopDrinkTick(); evalDown(); }
-function manualTimes(){
+function markDef(){ if(S.defT!=null||S.dphase!=='drink'||!canTeam(other(S.poss)))return;
+  S.defT=elapsedDrink();
+  const eff=S.defT+S.defMod, nm=drinker(other(S.poss)).name;
+  if(eff<=elapsedDrink()) evt(esc(nm)+' — DEFENSE SUCCESSFUL','good');
+  else evt(esc(nm)+' finished '+fmt(S.defT)+' — defense on if offense passes '+fmt(eff),'');
+  log(esc(nm)+' finished the defense drink at '+fmt(S.defT)+'.');
+  save(); render(); }
+function markOff(){ if(S.dphase!=='drink'||!canTeam(S.poss))return;
+  S.offT=elapsedDrink(); stopDrinkTick();
+  evt(esc(drinker(S.poss).name)+' finished — '+fmt(S.offT),'');
+  evalDown(false); }
+function manualTimes(){ if(!isHost())return;
   const o=prompt('Offense time (m:ss)','2:30'); if(o==null)return;
   const d=prompt('Defense time (m:ss) — blank if they did not finish','');
   const p=v=>{const m=v.trim().match(/^(\d+):([0-5]?\d)$/); return m?(+m[1]*60)+ +m[2]:null;};
   const ot=p(o); if(ot==null){alert('Bad format. Use m:ss');return;}
-  S.offT=ot; S.defT=d&&p(d)!=null?p(d):null; stopDrinkTick(); evalDown();
+  S.offT=ot; S.defT=d&&p(d)!=null?p(d):null; stopDrinkTick(); evalDown(false);
 }
-function evalDown(){
-  const r=row(), th=thr(r);
-  drinker(S.poss).chugsO.push(S.offT); S.stats[S.poss].chugsO.push(S.offT);
+function evalDown(auto){
+  const r=S.down, th=thr(r);
+  setClockRun(false);
+  if(!auto){ drinker(S.poss).chugsO.push(S.offT); S.stats[S.poss].chugsO.push(S.offT); }
   if(S.defT!=null){ drinker(other(S.poss)).chugsD.push(S.defT); S.stats[other(S.poss)].chugsD.push(S.defT); }
   const defEff=S.defT==null?null:S.defT+S.defMod;
   const hasDef=defEff!=null && defEff<S.offT;
   if(hasDef) S.stats[other(S.poss)].stops++;
+  if(S.offT>=th.b&&auto){
+    log('Down '+r+': '+esc(drinker(S.poss).name)+' hit the limit ('+fmt(th.b)+'). Turnover — possession over.');
+    resolveDown('TO'); return;
+  }
   if(S.offT>th.b){
-    log('Poss #'+r+' dn '+S.downNum+': '+esc(drinker(S.poss).name)+' over the limit ('+fmt(S.offT)+'). Turnover.');
+    log('Down '+r+': over the limit ('+fmt(S.offT)+'). Turnover.');
     resolveDown('TO'); return;
   }
   const bucket=r===4?'four':(S.offT<th.a?'fast':'mid');
@@ -475,13 +539,24 @@ function evalDown(){
 
 /* ---------- rolls ---------- */
 function rollDie(){ return 1+Math.floor(Math.random()*6); }
+function rollTeamFor(p){
+  if(!p)return null;
+  if(p.kind==='down')return S.poss;
+  if(p.kind==='big')return BIG[p.id].side==='off'?S.poss:other(S.poss);
+  if(p.kind==='coach')return p.team;
+  if(p.kind==='sub')return p.team!=null?p.team:other(S.poss);
+  if(p.kind==='patpick'||p.kind==='pat')return p.team;
+  return null;
+}
 function doDigitalRoll(){
+  if(!canTeam(rollTeamFor(S.pend)))return;
   const d=$('dieBox'); if(!d)return;
   d.classList.add('rolling','hot');
   let n=0; const anim=setInterval(()=>{ d.textContent=rollDie(); if(++n>7){clearInterval(anim); d.classList.remove('rolling'); applyRoll(+d.textContent);} },70);
 }
 function applyRoll(n){
   const p=S.pend; if(!p)return;
+  if(!canTeam(rollTeamFor(p)))return;
   snapshot(); p.roll=n;
   if(p.kind==='down')      resolveDown(TABLES[p.bucket][p.defense?'def':'no'][n]);
   else if(p.kind==='big')  resolveBig(p.id,n);
@@ -494,26 +569,29 @@ function applyRoll(n){
 function resolveDown(out){
   const T=S.teams[S.poss].name, p=S.pend||{};
   const ctx=p.roll?(' (rolled '+p.roll+(p.defense?', defense on':'')+')'):'';
-  if(out==='TO'){ S.stats[S.poss].to++; log('TURNOVER by '+T+ctx); changePoss(); }
-  else if(out==='FD'){ S.stats[S.poss].fd++; S.downNum++;
-    log('First down '+T+ctx+' — refill, next drinkers up.'); nextDown(null); }
-  else if(out==='FG'){ S.teams[S.poss].score+=3; S.stats[S.poss].fg++; S.pc=[0,0];
+  if(out==='TO'){ S.stats[S.poss].to++; if(p.roll)evt('Rolled '+p.roll+' — TURNOVER','bad');
+    log('TURNOVER by '+T+ctx); changePoss(); }
+  else if(out==='FD'){ S.stats[S.poss].fd++; evt('Rolled '+p.roll+' — FIRST DOWN','good');
+    log('First down '+T+ctx+' — new set, times tighten. Refill, next drinkers up.');
+    S.down=Math.min(4,S.down+1); nextDown(null); }
+  else if(out==='FG'){ S.teams[S.poss].score+=3; S.stats[S.poss].fg++; evt('Rolled '+p.roll+' — FIELD GOAL','good');
     log('FIELD GOAL — '+T+' +3'+ctx); changePoss(); }
-  else if(out==='TD'){ S.stats[S.poss].td++; S.teams[S.poss].score+=6; S.pc=[0,0];
+  else if(out==='TD'){ S.stats[S.poss].td++; S.teams[S.poss].score+=6; evt('Rolled '+p.roll+' — TOUCHDOWN','good');
     log('TOUCHDOWN — '+T+' +6'+ctx); startPat(S.poss,true); }
   save(); render();
 }
-function nextDown(msg){ stopDrinkTick(); S.defMod=0; S.dphase='pre'; S.pend=null; S.t0=null; S.pauseE=null; S.offT=null; S.defT=null;
+function nextDown(msg){ stopDrinkTick(); setClockRun(false); S.defMod=0; S.dphase='pre'; S.pend=null; S.t0=null; S.pauseE=null; S.offT=null; S.defT=null;
   S.rot[0]++; S.rot[1]++; if(msg)log(msg); save(); render(); }
-function changePoss(){ S.poss=other(S.poss); S.pc[S.poss]++; S.downNum=1;
-  nextDown(S.teams[S.poss].name+' takes over — possession #'+row()+'.'); }
+function changePoss(){ S.poss=other(S.poss); S.down=1;
+  nextDown(S.teams[S.poss].name+' takes over at down 1.'); }
 
-/* ---------- big plays (shots) ---------- */
+/* ---------- big plays ---------- */
 function pickShot(id){
   const b=BIG[id], team=b.side==='off'?S.poss:other(S.poss);
+  if(!canTeam(team))return;
   const sh=$('sheet');
   sh.innerHTML='<h2>'+b.name+' — who takes the shot?</h2>'+
-  roster(team).map((p,i)=>'<button class="pickbtn'+(drinker(team)===p?' cur':'')+'" onclick="shotGo(\''+id+'\','+team+','+i+')">'+esc(p.name)+'<small>'+p.shots+' shots</small></button>').join('')+
+  roster(team).map((p,i)=>'<button class="pickbtn'+(drinker(team)===p?' cur':'')+'" onclick="shotGo(\''+id+'\','+team+','+i+')">'+esc(p.name)+'<small>'+drinkCt(p)+' drinks · '+p.shots+' shots</small></button>').join('')+
   '<button class="btn ghost sm" onclick="closeSettings()">Cancel</button>';
   $('overlay').classList.add('show');
 }
@@ -521,107 +599,137 @@ function shotGo(id,team,pi){
   closeSettings(); snapshot();
   const b=BIG[id], p=roster(team)[pi];
   p.shots++; S.stats[team].shots++;
-  if(S.dphase==='drink'&&S.t0){ S.pauseE=now()-S.t0; stopDrinkTick(); }
-  log('SHOT — '+esc(p.name)+' ('+S.teams[team].name+') calls '+b.name+'. Timer paused.');
+  if(S.dphase==='drink'&&S.t0&&S.pauseE==null){ S.pauseE=now()-S.t0; stopDrinkTick(); }
+  setClockRun(false);
+  evt('SHOT — '+esc(p.name)+' calls '+b.name.toUpperCase(),'');
+  log('SHOT — '+esc(p.name)+' ('+S.teams[team].name+') calls '+b.name+'. Everything pauses.');
   S.pend={kind:'big',id,prev:S.dphase}; S.dphase='roll'; save(); render();
 }
 function resumePlay(prev){
   S.dphase=prev; S.pend=null;
-  if(prev==='drink'){
-    if(S.running){ if(S.pauseE!=null){ S.t0=now()-S.pauseE; S.pauseE=null; } startDrinkTick(); }
-    else log('Game clock is paused — chug resumes when the clock does.'); }
+  if(prev==='drink'&&!S.timeout){
+    if(S.pauseE!=null){ S.t0=now()-S.pauseE; S.pauseE=null; }
+    setClockRun(true); startDrinkTick(); }
   save(); render();
 }
 function resolveBig(id,n){
   const b=BIG[id], out=b.map[n], off=S.poss, def=other(S.poss);
-  if(out==='N'){ log(b.name+': nothing (rolled '+n+'). Timer back on.'); resumePlay(S.pend.prev); return; }
-  if(out==='TD'){ S.stats[off].td++; S.teams[off].score+=6; S.pc=[0,0]; log(b.name+' — TOUCHDOWN '+S.teams[off].name+' +6 (rolled '+n+')'); startPat(off,true); }
-  else if(out==='OFF_TD'){ S.stats[off].td++; S.teams[off].score+=6; S.pc=[0,0]; log(b.name+' backfires — TOUCHDOWN '+S.teams[off].name+' +6 (rolled '+n+')'); startPat(off,true); }
-  else if(out==='FD'){ S.stats[off].fd++; S.downNum++; log(b.name+' backfires — automatic first down (rolled '+n+')'); nextDown(null); }
-  else if(out==='TO'){ S.stats[off].to++; log(b.name+': turnover (rolled '+n+')'); changePoss(); }
-  else if(out==='HM_TO'){ S.stats[off].to++; log('Hail Mary picked off (rolled 1)! '+S.teams[def].name+' rolls for the pick-6...');
-    S.pend={kind:'sub',sub:'pick6',team:def}; save(); render(); return; }
-  else if(out==='INT_TO'){ S.stats[off].to++; log('INTERCEPTION (rolled 6)! '+S.teams[def].name+' rolls for the pick-6...');
-    S.pend={kind:'sub',sub:'pick6',team:def}; save(); render(); return; }
-  else if(out==='SACK'){ S.defMod-=60; log('SACK (rolled '+n+') — defense −1:00 this down. Rolling for the strip...');
-    S.pend={kind:'sub',sub:'strip',prev:S.pend.prev}; save(); render(); return; }
+  if(out==='N'){ evt(b.name+': rolled '+n+' — NOTHING',''); log(b.name+': nothing (rolled '+n+'). Play on.'); resumePlay(S.pend.prev); return; }
+  if(out==='TD'){ S.stats[off].td++; S.teams[off].score+=6; evt(b.name.toUpperCase()+' — TOUCHDOWN','good'); log(b.name+' — TOUCHDOWN '+S.teams[off].name+' +6 (rolled '+n+')'); startPat(off,true); }
+  else if(out==='OFF_TD'){ S.stats[off].td++; S.teams[off].score+=6; evt('INT BACKFIRES — TD OFFENSE','good'); log(b.name+' backfires — TOUCHDOWN '+S.teams[off].name+' +6 (rolled '+n+')'); startPat(off,true); }
+  else if(out==='FD'){ S.stats[off].fd++; evt('SACK BACKFIRES — FIRST DOWN','good'); log(b.name+' backfires — automatic first down (rolled '+n+')'); S.down=Math.min(4,S.down+1); nextDown(null); }
+  else if(out==='TO'){ S.stats[off].to++; evt(b.name+': rolled '+n+' — TURNOVER','bad'); log(b.name+': turnover (rolled '+n+')'); changePoss(); }
+  else if(out==='HM_TO'){ S.stats[off].to++; evt('PICKED OFF — pick-6 roll coming','bad'); log('Hail Mary picked off (rolled 1)! '+S.teams[def].name+' rolls for the pick-6...');
+    S.pend={kind:'sub',sub:'pick6',team:def,prev:'pre'}; save(); render(); return; }
+  else if(out==='INT_TO'){ S.stats[off].to++; evt('INTERCEPTION — pick-6 roll coming','bad'); log('INTERCEPTION (rolled 6)! '+S.teams[def].name+' rolls for the pick-6...');
+    S.pend={kind:'sub',sub:'pick6',team:def,prev:'pre'}; save(); render(); return; }
+  else if(out==='SACK'){ S.defMod-=60; evt('SACK — def −1:00, strip roll coming','good'); log('SACK (rolled '+n+') — defense −1:00 this down. Rolling for the strip...');
+    S.pend={kind:'sub',sub:'strip',team:def,prev:S.pend.prev}; save(); render(); return; }
   save(); render();
 }
 function resolveSub(n){
   const p=S.pend, ok=SUB_SUCCESS.includes(n);
   if(p.sub==='pick6'){
-    if(ok){ S.stats[p.team].td++; S.teams[p.team].score+=6; S.pc=[0,0]; log('PICK SIX — '+S.teams[p.team].name+' +6 (rolled '+n+')'); startPat(p.team,false); }
-    else { log('No return (rolled '+n+').'); changePoss(); }
+    if(ok){ S.stats[p.team].td++; S.teams[p.team].score+=6; evt('PICK SIX — rolled '+n,'good'); log('PICK SIX — '+S.teams[p.team].name+' +6 (rolled '+n+')'); startPat(p.team,false); }
+    else { evt('No return — rolled '+n,''); log('No return (rolled '+n+').'); changePoss(); }
   } else if(p.sub==='strip'){
-    if(ok){ S.stats[S.poss].to++; log('STRIP SACK (rolled '+n+') — turnover!'); changePoss(); }
-    else { log('No strip (rolled '+n+'). Play on, defense −1:00.'); resumePlay(p.prev||'pre'); }
+    if(ok){ S.stats[S.poss].to++; evt('STRIP SACK — TURNOVER','bad'); log('STRIP SACK (rolled '+n+') — turnover!'); changePoss(); }
+    else { evt('No strip — rolled '+n,''); log('No strip (rolled '+n+'). Play on, defense −1:00.'); resumePlay(p.prev||'pre'); }
   }
 }
 
-/* ---------- coaching ---------- */
+/* ---------- coaching & timeouts ---------- */
 function startCoach(id){
   const c=COACH[id], team=id==='wildcat'?S.poss:other(S.poss);
+  if(!canTeam(team))return;
   if(S.teams[team].coachUsed){alert(S.teams[team].name+' already used their coaching decision this quarter.');return;}
-  if(!confirm(S.teams[team].name+' burns their coaching decision on '+c.name+'? (Once per quarter, before the down. No shot option for the extra player.)'))return;
+  if(!confirm(S.teams[team].name+' burns their coaching decision on '+c.name+'? (Once per quarter, before the down.)'))return;
   snapshot(); S.teams[team].coachUsed=true; S.stats[team].coach++;
   log('Coaching decision — '+S.teams[team].name+' calls '+c.name+'.');
   S.pend={kind:'coach',id,team}; S.dphase='roll'; save(); render();
 }
 function resolveCoach(id,n){
   const c=COACH[id], out=c.map[n], team=S.pend.team;
-  if(out==='TO'){ S.stats[S.poss].to++; log(c.name+' blows up (rolled 6) — turnover on '+S.teams[S.poss].name+'.'); changePoss(); return; }
+  if(out==='TO'){ S.stats[S.poss].to++; evt(c.name.toUpperCase()+' BLOWS UP — TURNOVER','bad'); log(c.name+' blows up (rolled 6) — turnover on '+S.teams[S.poss].name+'.'); changePoss(); return; }
   S.rot[team]++;
   const nm=esc(drinker(team).name);
-  if(out==='SUB'){ log(c.name+' (rolled '+n+'): new '+c.who+' drinker in — '+nm+'.'); }
-  else { S.defMod+=c.mod; log(c.name+' (rolled '+n+'): '+nm+' in, defense '+(c.mod>0?'+':'−')+'1:00 this down.'); }
+  if(out==='SUB'){ evt(c.name+': new drinker — '+nm,''); log(c.name+' (rolled '+n+'): new '+c.who+' drinker in — '+nm+'.'); }
+  else { S.defMod+=c.mod; evt(c.name+': '+nm+' in, def '+(c.mod>0?'+':'−')+'1:00',''); log(c.name+' (rolled '+n+'): '+nm+' in, defense '+(c.mod>0?'+':'−')+'1:00 this down.'); }
   S.dphase='pre'; S.pend=null; save(); render();
+}
+function callTimeout(t){
+  if(!canTeam(t)||S.tol[t]<=0||S.timeout||S.dphase==='roll'||S.brk)return;
+  snapshot(); S.tol[t]--;
+  S.timeout={team:t};
+  if(S.dphase==='drink'&&S.t0&&S.pauseE==null){ S.pauseE=now()-S.t0; stopDrinkTick(); }
+  setClockRun(false);
+  evt('TIMEOUT — '+esc(S.teams[t].name),''); log('Timeout, '+S.teams[t].name+' ('+S.tol[t]+' left this half). Everything pauses.');
+  save(); render();
+}
+function endTimeout(){
+  if(!S.timeout)return;
+  if(!isHost()&&!canTeam(S.timeout.team))return;
+  S.timeout=null;
+  if(S.dphase==='drink'&&S.pauseE!=null){ S.t0=now()-S.pauseE; S.pauseE=null; setClockRun(true); startDrinkTick(); }
+  evt('BACK TO IT',''); log('Timeout over.');
+  save(); render();
 }
 
 /* ---------- PAT ---------- */
 function startPat(team,flipAfter){ S.pend={kind:'patpick',team,flipAfter}; S.dphase='roll'; save(); render(); }
-function pickPat(mode){ S.pend.kind='pat'; S.pend.mode=mode; render(); }
+function pickPat(mode){ if(!canTeam(S.pend.team))return; S.pend.kind='pat'; S.pend.mode=mode; render(); }
 function resolvePat(n){
   const p=S.pend, T=S.teams[p.team].name;
-  if(p.mode==='kick'){ if(n>=2){S.teams[p.team].score+=1; log('PAT good — '+T+' +1 (rolled '+n+')');} else log('PAT missed (rolled 1).'); }
-  else { if(n>=5){S.teams[p.team].score+=2; log('Two-point conversion GOOD — '+T+' +2 (rolled '+n+')');} else log('Two-point try fails (rolled '+n+').'); }
+  if(p.mode==='kick'){ if(n>=2){S.teams[p.team].score+=1; evt('PAT GOOD','good'); log('PAT good — '+T+' +1 (rolled '+n+')');} else {evt('PAT MISSED — rolled 1','bad'); log('PAT missed (rolled 1).');} }
+  else { if(n>=5){S.teams[p.team].score+=2; evt('TWO-POINT GOOD','good'); log('Two-point conversion GOOD — '+T+' +2 (rolled '+n+')');} else {evt('TWO-POINT FAILS','bad'); log('Two-point try fails (rolled '+n+').');} }
   if(p.flipAfter) changePoss();
-  else { S.pc[S.poss]++; S.downNum=1; nextDown(S.teams[S.poss].name+' keeps the ball after the defensive score — possession #'+row()+'.'); }
+  else { S.down=1; nextDown(S.teams[S.poss].name+' keeps the ball at down 1 after the defensive score.'); }
 }
 
-/* ---------- edits ---------- */
-function editName(i){ const v=prompt('Team name',S.teams[i].name); if(v){S.teams[i].name=v.trim().slice(0,14)||S.teams[i].name; save(); render();} }
-function editScore(i){ const v=prompt('Set score for '+S.teams[i].name,S.teams[i].score); if(v!=null&&!isNaN(+v)){snapshot();S.teams[i].score=Math.max(0,+v);save();render();} }
-function editPoss(){ const v=prompt('Set possession # for '+S.teams[S.poss].name+' (1-4+)',S.pc[S.poss]); if(v&&+v>0){snapshot();S.pc[S.poss]=+v;save();render();} }
-function flipPoss(){ if(!confirm('Manually flip possession?'))return; snapshot(); S.poss=other(S.poss); if(S.pc[S.poss]<1)S.pc[S.poss]=1; S.downNum=1; nextDown('Possession set to '+S.teams[S.poss].name+' (manual).'); }
-function editClock(){ const v=prompt('Set clock (m:ss)',fmt(effClock())); if(!v)return; const m=v.trim().match(/^(\d+):([0-5]?\d)$/); if(m){snapshot();S.clock=(+m[1]*60)+ +m[2]; if(S.running)S.canchor=now(); save();render();} }
+/* ---------- edits (host only) ---------- */
+function editName(i){ if(!isHost())return; const v=prompt('Team name',S.teams[i].name); if(v){S.teams[i].name=v.trim().slice(0,14)||S.teams[i].name; save(); render();} }
+function editScore(i){ if(!isHost())return; const v=prompt('Host override — set score for '+S.teams[i].name,S.teams[i].score); if(v!=null&&!isNaN(+v)){snapshot();S.teams[i].score=Math.max(0,+v);save();render();} }
+function editDown(){ if(!isHost())return; const v=prompt('Set down (1-4)',S.down); if(v&&[1,2,3,4].includes(+v)){snapshot();S.down=+v;save();render();} }
+function flipPoss(){ if(!isHost())return; if(!confirm('Manually flip possession?'))return; snapshot(); S.poss=other(S.poss); S.down=1; nextDown('Possession set to '+S.teams[S.poss].name+' (manual).'); }
+function editClock(){ if(!isHost())return; const v=prompt('Set clock (m:ss)',fmt(effClock())); if(!v)return; const m=v.trim().match(/^(\d+):([0-5]?\d)$/); if(m){snapshot();S.clock=(+m[1]*60)+ +m[2]; if(S.running)S.canchor=now(); save();render();} }
 
 /* ---------- render ---------- */
 function render(){
   const app=$('app');
   if(!S||S.phase==='setup'){ app.innerHTML=setupHTML(); loadLobbyInto('homeLobby'); return; }
-  if(S.phase==='final'){ app.innerHTML=finalHTML(); return; }
+  if(S.phase==='final'){ app.innerHTML=finalHTML(); toastCheck(); return; }
   app.innerHTML='<div class="gamecols"><div class="colL">'+scoreHTML()+stageHTML()+chipsHTML()+
     '</div><div class="colR">'+logHTML()+statsHTML()+'</div></div>';
   if(S.running&&!clockTick)startClock();
+  toastCheck();
+}
+function toastCheck(){
+  if(!S||!S.evt||S.evt.n<=shownEvt)return;
+  shownEvt=S.evt.n;
+  const d=document.createElement('div'); d.className='splash '+(S.evt.kind||'');
+  d.innerHTML=S.evt.txt; document.body.appendChild(d);
+  setTimeout(()=>{ d.classList.add('out'); setTimeout(()=>d.remove(),400); },2200);
 }
 function scoreHTML(){
   const t=i=>{const tm=S.teams[i];return '<div class="sb-team'+(S.poss===i?' poss':'')+'" onclick="editName('+i+')">'+
     '<div class="sb-name">'+(S.poss===i?'<span class="possdot"></span>':'')+esc(tm.name)+'</div>'+
     '<div class="sb-score" onclick="event.stopPropagation();editScore('+i+')">'+tm.score+'</div></div>';};
+  const who=myRole();
   return '<header id="scorebar"><div class="sb-row">'+t(0)+
-    '<div class="sb-mid"><div class="sb-q">'+qname(S.qtr)+'</div>'+
+    '<div class="sb-mid"><div class="sb-q">'+(S.brk?'END '+qname(S.qtr):qname(S.qtr))+'</div>'+
     '<div class="sb-clock digits'+(S.running?'':' stopped')+'" id="clk" onclick="toggleClock()" oncontextmenu="event.preventDefault();editClock()">'+fmt(effClock())+'</div>'+
-    '<div class="sb-down" onclick="editPoss()">Poss #'+row()+' · Dn '+S.downNum+'</div></div>'+t(1)+'</div>'+
+    '<div class="sb-down" onclick="editDown()">Down '+S.down+' · TOs '+S.tol[0]+'-'+S.tol[1]+'</div></div>'+t(1)+'</div>'+
     '<div class="sb-tools"><button class="tool" onclick="goHome()">⌂ Home</button>'+
-    '<button class="tool" onclick="undo()">↩ Undo</button>'+
+    (isHost()?'<button class="tool" onclick="undo()">↩ Undo</button><button class="tool" onclick="flipPoss()">⇄ Poss</button>':
+      '<span class="tool" style="cursor:default">'+(who&&who.role==='player'?esc(who.name):'guest')+'</span>')+
     (R.code?'<button class="tool" style="color:'+(R.ws&&R.ws.readyState===1?'var(--td)':'var(--red)')+'" onclick="openSettings()">● '+R.code+'</button>':'')+
-    '<button class="tool" onclick="flipPoss()">⇄ Poss</button>'+
     '<button class="tool" onclick="openSettings()">☰ Menu</button></div></header>';
 }
 function drinkline(){
   return '<div class="drinkline"><span class="dp off" onclick="pickDrinker('+S.poss+')">🍺 '+esc(drinker(S.poss).name)+'</span><span class="vs">VS</span><span class="dp" onclick="pickDrinker('+other(S.poss)+')">🍺 '+esc(drinker(other(S.poss)).name)+'</span></div>';
 }
 function pickDrinker(team){
+  if(!canTeam(team))return;
   const sh=$('sheet');
   sh.innerHTML='<h2>'+esc(S.teams[team].name)+' — who is drinking?</h2>'+
   roster(team).map((p,i)=>'<button class="pickbtn'+(drinker(team)===p?' cur':'')+'" onclick="setDrinker('+team+','+i+')">'+esc(p.name)+'<small>'+drinkCt(p)+' drinks · '+p.shots+' shots</small></button>').join('')+
@@ -640,80 +748,102 @@ function oddsBlock(id,head,tbl){
   '<div class="oline"><b>No D</b>'+mapLine(tbl.no)+'</div><div class="oline"><b>Def</b>'+mapLine(tbl.def)+'</div></div>';
 }
 function bucketTables(){
-  const r=row(), th=thr(r);
+  const r=S.down, th=thr(r);
   if(r===4) return '<div class="oddswrap one">'+oddsBlock('bt0','&lt; '+fmt(th.b),TABLES.four)+'</div>'+
-    '<div class="bucketline"><span class="bkt dead" id="btOver">&gt; '+fmt(th.b)+' → TO</span></div>';
+    '<div class="bucketline"><span class="bkt dead" id="btOver">&gt; '+fmt(th.b)+' → TO, possession over</span></div>';
   return '<div class="oddswrap">'+oddsBlock('bt0','&lt; '+fmt(th.a),TABLES.fast)+oddsBlock('bt1',fmt(th.a)+'–'+fmt(th.b),TABLES.mid)+'</div>'+
-    '<div class="bucketline"><span class="bkt dead" id="btOver">&gt; '+fmt(th.b)+' → TO</span></div>';
+    '<div class="bucketline"><span class="bkt dead" id="btOver">&gt; '+fmt(th.b)+' → TO, possession over</span></div>';
 }
 function stageHTML(){
-  const off=esc(S.teams[S.poss].name), defnm=esc(S.teams[other(S.poss)].name);
+  const off=esc(S.teams[S.poss].name);
+  if(S.brk){
+    return '<div class="card"><h2>End of '+qname(S.qtr)+'</h2>'+
+    '<div class="finalscore digits" style="font-size:2rem">'+S.teams[0].score+' — '+S.teams[1].score+'</div>'+
+    (S.brk.next===3?'<p class="hint" style="text-align:center">Halftime — '+esc(S.teams[other(S.opening)].name)+' receives to start the second half. Timeouts reset.</p>':'')+
+    (isHost()?'<button class="btn amber" onclick="startQuarter()">Start '+qname(S.brk.next)+'</button>':
+      '<p class="hint" style="text-align:center;color:var(--amber)">Waiting for the host to start '+qname(S.brk.next)+'\u2026</p>')+'</div>';
+  }
+  if(S.timeout){
+    const t=S.timeout.team;
+    return '<div class="card"><h2>Timeout — '+esc(S.teams[t].name)+'</h2>'+
+    '<p class="hint" style="text-align:center">'+S.tol[t]+' remaining this half. Game clock and drink timer are frozen.</p>'+
+    ((isHost()||canTeam(t))?'<button class="btn amber" onclick="endTimeout()">Resume play</button>':
+      '<p class="hint" style="text-align:center;color:var(--amber)">Waiting for '+esc(S.teams[t].name)+' or the host to resume\u2026</p>')+'</div>';
+  }
   if(S.dphase==='pre'){
-    return '<div class="card"><h2>Possession #'+row()+' · Down '+S.downNum+' — '+off+'</h2>'+drinkline()+
+    return '<div class="card"><h2>Down '+S.down+' — '+off+'</h2>'+drinkline()+
     bucketTables()+
-    '<p class="hint">Fresh drinks up. Start the down, tap whoever finishes first. '+
+    '<p class="hint">Fresh drinks up. '+
     (S.defMod?'<b style="color:var(--amber)">Defense modifier: '+(S.defMod>0?'+':'−')+fmt(Math.abs(S.defMod))+'</b>. ':'')+
-    (row()===4?'4th scoreless possession — '+fmt(thr(4).b)+' limit, field goal in play. ':'')+
-    'Coaching decisions before the snap only.</p>'+
-    '<button class="btn amber" onclick="startDown()">Start down</button></div>';
+    (S.down===4?'Down 4 — '+fmt(thr(4).b)+' limit, field goal in play. ':'')+
+    'Clock runs while the drinks are live.</p>'+
+    '<button class="btn amber" onclick="startDown()" '+(canTeam(S.poss)?'':'disabled')+'>Start down'+(canTeam(S.poss)?'':' ('+off+' starts)')+'</button></div>';
   }
   if(S.dphase==='drink'){
-    return '<div class="card"><h2>Chug — possession #'+row()+' · down '+S.downNum+'</h2>'+drinkline()+
+    const defOn=S.defT!=null&&(S.defT+S.defMod)<=elapsedDrink();
+    return '<div class="card"><h2>Chug — down '+S.down+'</h2>'+drinkline()+
     '<div class="bigtime digits" id="drinkT"'+(S.pauseE!=null?' style="opacity:.45"':'')+'>'+fmt(elapsedDrink())+'</div>'+
-    (S.pauseE!=null?'<p class="hint" style="text-align:center;color:var(--amber)">PAUSED — tap the game clock to resume</p>':'')+
+    (S.pauseE!=null?'<p class="hint" style="text-align:center;color:var(--amber)">PAUSED</p>':'')+
     bucketTables()+
     (S.defMod?'<p class="hint" style="text-align:center">Defense effective time '+(S.defMod>0?'+':'−')+fmt(Math.abs(S.defMod))+'</p>':'')+
-    (S.defT!=null?'<p class="hint" style="text-align:center;color:var(--amber)">'+esc(drinker(other(S.poss)).name)+' finished at '+fmt(S.defT)+' — defense is on if that beats the offense.</p>':'')+
+    (S.defT!=null?'<p class="hint" style="text-align:center;color:'+(defOn?'var(--td)':'var(--amber)')+'">'+
+      (defOn?'DEFENSE SUCCESSFUL — no touchdown available this down.':esc(drinker(other(S.poss)).name)+' finished '+fmt(S.defT)+' — defense on if offense passes '+fmt(S.defT+S.defMod)+'.')+'</p>':'')+
     '<div class="btnrow">'+
-    '<button class="btn" onclick="markDef()" '+(S.defT!=null?'disabled':'')+'>'+esc(drinker(other(S.poss)).name)+' finished</button>'+
-    '<button class="btn amber" id="offBtn" onclick="markOff()">'+esc(drinker(S.poss).name)+' finished</button></div>'+
-    '<button class="btn ghost sm" onclick="manualTimes()">Enter times manually</button></div>';
+    '<button class="btn" onclick="markDef()" '+((S.defT==null&&canTeam(other(S.poss)))?'':'disabled')+'>'+esc(drinker(other(S.poss)).name)+' finished</button>'+
+    '<button class="btn amber" id="offBtn" onclick="markOff()" '+(canTeam(S.poss)?'':'disabled')+'>'+esc(drinker(S.poss).name)+' finished</button></div>'+
+    (isHost()?'<button class="btn ghost sm" onclick="manualTimes()">Enter times manually</button>':'')+'</div>';
   }
   if(S.dphase==='roll') return rollHTML();
   return '';
 }
 function describeMap(map){
   const names={TO:'TO',FD:'1st',TD:'TD',FG:'FG',N:'—',HM_TO:'TO⊕',INT_TO:'TO⊕',SACK:'−1:00⊕',OFF_TD:'TD (off)',SUB:'Sub',SUBMOD:'Sub±1:00'};
-  const groups=[]; let s=1;
-  for(let n=2;n<=7;n++){ if(n===7||map[n]!==map[s]){ groups.push('<span class="stake"><b>'+(s===n-1?s:s+'–'+(n-1))+'</b> '+names[map[s]]+'</span>'); s=n; } }
+  const groups=[]; let st=1;
+  for(let n=2;n<=7;n++){ if(n===7||map[n]!==map[st]){ groups.push('<span class="stake"><b>'+(st===n-1?st:st+'–'+(n-1))+'</b> '+names[map[st]]+'</span>'); st=n; } }
   return '<div class="stakes">'+groups.join('')+'</div>';
 }
 function rollHTML(){
   const p=S.pend; let title='',ctx='',map=null,special='';
-  if(p.kind==='down'){ title='The roll — possession #'+row();
-    ctx=(p.defense?'DEFENSE on the play':'No defense')+' · '+(p.bucket==='four'?'made the 90s':p.bucket==='fast'?'fast window':'slow window')+' · chug '+fmt(S.offT);
+  const team=rollTeamFor(p), allowed=canTeam(team);
+  if(p.kind==='down'){ title='The roll — down '+S.down;
+    ctx=(p.defense?'DEFENSE SUCCESSFUL':'No defense')+' · '+(p.bucket==='four'?'made the limit':p.bucket==='fast'?'fast window':'slow window')+' · chug '+fmt(S.offT);
     map=TABLES[p.bucket][p.defense?'def':'no']; }
-  else if(p.kind==='big'){ title=BIG[p.id].name; ctx='Big play — shot taken, timer paused'; map=BIG[p.id].map; }
+  else if(p.kind==='big'){ title=BIG[p.id].name; ctx='Big play — shot taken, everything paused'; map=BIG[p.id].map; }
   else if(p.kind==='coach'){ title=COACH[p.id].name; ctx='Coaching decision'; map=COACH[p.id].map; }
-  else if(p.kind==='sub'){ title=p.sub==='pick6'?'Pick-six roll':'Strip-sack roll'; ctx='4–6 converts';
+  else if(p.kind==='sub'){ title=p.sub==='pick6'?'Pick-six roll':'Strip-sack roll'; ctx=esc(S.teams[p.team].name)+' rolls — 4–6 converts';
     map={1:'N',2:'N',3:'N',4:p.sub==='pick6'?'TD':'TO',5:p.sub==='pick6'?'TD':'TO',6:p.sub==='pick6'?'TD':'TO'}; }
   else if(p.kind==='patpick'){
     return '<div class="card"><h2>Touchdown — '+esc(S.teams[p.team].name)+'</h2>'+
     '<p class="hint">Kick is good on 2–6 (+1). Going for two needs 5 or 6 (+2).</p>'+
-    '<div class="btnrow"><button class="btn amber" onclick="pickPat(\'kick\')">Kick PAT</button>'+
-    '<button class="btn" onclick="pickPat(\'two\')">Go for 2</button></div></div>';
+    (allowed?'<div class="btnrow"><button class="btn amber" onclick="pickPat(\'kick\')">Kick PAT</button>'+
+    '<button class="btn" onclick="pickPat(\'two\')">Go for 2</button></div>':
+    '<p class="hint" style="color:var(--amber)">Waiting for '+esc(S.teams[p.team].name)+' to choose\u2026</p>')+'</div>';
   }
   else if(p.kind==='pat'){ title=p.mode==='kick'?'PAT kick':'Two-point try'; ctx=esc(S.teams[p.team].name);
     special=p.mode==='kick'?'<div class="stakes"><span class="stake"><b>1</b> miss</span><span class="stake"><b>2–6</b> +1</span></div>'
                            :'<div class="stakes"><span class="stake"><b>1–4</b> no good</span><span class="stake"><b>5–6</b> +2</span></div>'; }
   const stakes=special||(map?describeMap(map):'');
-  const dice=S.dice==='digital'
-    ? '<div class="die digits" id="dieBox">?</div><button class="btn amber" onclick="doDigitalRoll()">Roll</button>'
-    : '<p class="hint" style="text-align:center">Roll a real die, tap the result.</p><div class="manualdice">'+[1,2,3,4,5,6].map(n=>'<button onclick="applyRoll('+n+')">'+n+'</button>').join('')+'</div>';
+  const dice=!allowed
+    ? '<p class="hint" style="text-align:center;color:var(--amber)">Waiting for '+esc(S.teams[team].name)+' to roll\u2026</p>'
+    : (S.dice==='digital'
+      ? '<div class="die digits" id="dieBox">?</div><button class="btn amber" onclick="doDigitalRoll()">Roll</button>'
+      : '<p class="hint" style="text-align:center">Roll a real die, tap the result.</p><div class="manualdice">'+[1,2,3,4,5,6].map(n=>'<button onclick="applyRoll('+n+')">'+n+'</button>').join('')+'</div>');
   return '<div class="card"><h2>'+title+'</h2><p class="hint">'+ctx+'</p>'+stakes+dice+
-  '<button class="btn ghost sm" onclick="toggleDice()">Dice: '+S.dice+' — switch</button></div>';
+  (allowed?'<button class="btn ghost sm" onclick="toggleDice()">Dice: '+S.dice+' — switch</button>':'')+'</div>';
 }
 function toggleDice(){ S.dice=S.dice==='digital'?'manual':'digital'; save(); render(); }
 function chipsHTML(){
-  if(S.dphase==='roll')return '';
-  const off=S.poss, def=other(S.poss), pre=S.dphase==='pre';
+  if(S.dphase==='roll'||S.brk)return '';
+  const off=S.poss, def=other(S.poss), pre=S.dphase==='pre', to=!S.timeout;
   return '<div class="card"><h2>Sideline</h2><div class="chips">'+
-  '<button class="chip shot" onclick="pickShot(\'hail\')">Hail Mary<small>'+esc(S.teams[off].name)+' · shot</small></button>'+
-  '<button class="chip shot" onclick="pickShot(\'fourth\')">4th Down<small>'+esc(S.teams[off].name)+' · shot</small></button>'+
-  '<button class="chip shot" onclick="pickShot(\'sack\')">Sack<small>'+esc(S.teams[def].name)+' · shot</small></button>'+
-  '<button class="chip shot" onclick="pickShot(\'int\')">Interception<small>'+esc(S.teams[def].name)+' · shot</small></button>'+
-  '<button class="chip" onclick="startCoach(\'wildcat\')" '+(pre&&!S.teams[off].coachUsed?'':'disabled')+'>Wildcat<small>'+esc(S.teams[off].name)+' · coach</small></button>'+
-  '<button class="chip" onclick="startCoach(\'blitz\')" '+(pre&&!S.teams[def].coachUsed?'':'disabled')+'>Blitz<small>'+esc(S.teams[def].name)+' · coach</small></button>'+
+  '<button class="chip shot" onclick="pickShot(\'hail\')" '+(canTeam(off)&&to?'':'disabled')+'>Hail Mary<small>'+esc(S.teams[off].name)+' · shot</small></button>'+
+  '<button class="chip shot" onclick="pickShot(\'fourth\')" '+(canTeam(off)&&to?'':'disabled')+'>4th Down<small>'+esc(S.teams[off].name)+' · shot</small></button>'+
+  '<button class="chip shot" onclick="pickShot(\'sack\')" '+(canTeam(def)&&to?'':'disabled')+'>Sack<small>'+esc(S.teams[def].name)+' · shot</small></button>'+
+  '<button class="chip shot" onclick="pickShot(\'int\')" '+(canTeam(def)&&to?'':'disabled')+'>Interception<small>'+esc(S.teams[def].name)+' · shot</small></button>'+
+  '<button class="chip" onclick="startCoach(\'wildcat\')" '+(pre&&to&&!S.teams[off].coachUsed&&canTeam(off)?'':'disabled')+'>Wildcat<small>'+esc(S.teams[off].name)+' · coach</small></button>'+
+  '<button class="chip" onclick="startCoach(\'blitz\')" '+(pre&&to&&!S.teams[def].coachUsed&&canTeam(def)?'':'disabled')+'>Blitz<small>'+esc(S.teams[def].name)+' · coach</small></button>'+
+  '<button class="chip" onclick="callTimeout(0)" '+(S.tol[0]>0&&to&&canTeam(0)?'':'disabled')+'>Timeout<small>'+esc(S.teams[0].name)+' · '+S.tol[0]+' left</small></button>'+
+  '<button class="chip" onclick="callTimeout(1)" '+(S.tol[1]>0&&to&&canTeam(1)?'':'disabled')+'>Timeout<small>'+esc(S.teams[1].name)+' · '+S.tol[1]+' left</small></button>'+
   '</div></div>';
 }
 function logHTML(){
@@ -757,18 +887,26 @@ function statsHTML(){
   '<h3>Players — this game</h3>'+playerTable()+'</div>'+alltime+'</details>'+refHTML();
 }
 function rulesBody(){
+  const bigRow=(nm,map,who)=>{ const names={TO:'TO⊕',FD:'1st',TD:'TD',N:'—',HM_TO:'TO⊕',INT_TO:'TO⊕',SACK:'−1:00⊕',OFF_TD:'TD off'};
+    return '<tr><td style="text-align:left">'+nm+'<br><span style="color:var(--muted)">'+who+'</span></td>'+[1,2,3,4,5,6].map(n=>'<td>'+(names[map[n]]||map[n])+'</td>').join('')+'</tr>'; };
   return '<div class="ref">'+
-  '<h3>How the game works</h3><p>Two teams, two or more drinkers each. The offense and defense each chug a drink every down — a race. If the defense finishes first, the Defense odds apply and a touchdown is off the table. The offense\u2019s chug time picks which odds table you roll on, and a d6 decides the play: turnover, first down, or score. First downs keep the drive alive (refill, next drinkers up); the longer a team goes without scoring, the tighter its chug windows get. Shots buy big-play gambles anytime; each team gets one coaching decision per quarter. Highest score after four quarters wins.</p>'+
-  '<h3>The grid</h3><p>Times below assume 15:00 quarters — shorter quarters scale every limit proportionally (10:00 quarters \u2192 \u00d7\u2154, shown live on the down card). Row = how many possessions in a row without a score. ANY score resets BOTH teams to row 1. Column = how fast the offense chugs. Both teams drink every down; if the defense finishes first, Defense odds apply. Every roll: refill, rotate drinkers.</p>'+
-  '<table><tr><th>Poss</th><th>Left table</th><th>Right table</th><th>Auto TO</th></tr>'+
-  '<tr><td>#1</td><td>&lt;4:00</td><td>4–6</td><td>&gt;6:00</td></tr><tr><td>#2</td><td>&lt;3:00</td><td>3–5</td><td>&gt;5:00</td></tr>'+
-  '<tr><td>#3</td><td>&lt;2:00</td><td>2–4</td><td>&gt;4:00</td></tr><tr><td>#4+</td><td colspan="2">&lt;1:30 (FG live)</td><td>&gt;1:30</td></tr></table>'+
+  '<h3>How the game works</h3><p>Two teams, two or more drinkers each. Every down the offense and defense drinker each chug — a race. If the defense finishes first, Defense odds apply and no touchdown is possible. The offense\u2019s time picks the odds column, a d6 decides the play. A first down advances you a row: a fresh set of downs with tighter times. Turnover or score ends the possession and the opponent restarts at down 1. Everyone refills and rotates after every roll. Clock runs only while drinks are live. Highest score after four quarters wins; halftime flips who receives.</p>'+
+  '<p>Times below assume 15:00 quarters — shorter quarters scale every limit proportionally (10:00 \u2192 \u00d7\u2154; live values always show on the down card).</p>'+
+  '<table><tr><th>Down</th><th>Left table</th><th>Right table</th><th>Auto TO</th></tr>'+
+  '<tr><td>1</td><td>&lt;4:00</td><td>4–6</td><td>&gt;6:00</td></tr><tr><td>2</td><td>&lt;3:00</td><td>3–5</td><td>&gt;5:00</td></tr>'+
+  '<tr><td>3</td><td>&lt;2:00</td><td>2–4</td><td>&gt;4:00</td></tr><tr><td>4</td><td colspan="2">&lt;1:30 (FG live)</td><td>&gt;1:30</td></tr></table>'+
+  '<p>Hitting the auto-TO limit ends the possession instantly — no roll.</p>'+
   '<h3>Left table</h3><table><tr><th></th><th>TO</th><th>1st</th><th>TD</th></tr><tr><td>No def</td><td>1</td><td>2–3</td><td>4–6</td></tr><tr><td>Defense</td><td>1–2</td><td>3–6</td><td>✕</td></tr></table>'+
   '<h3>Right table</h3><table><tr><th></th><th>TO</th><th>1st</th><th>TD</th></tr><tr><td>No def</td><td>1–2</td><td>3–4</td><td>5–6</td></tr><tr><td>Defense</td><td>1–3</td><td>4–6</td><td>✕</td></tr></table>'+
-  '<h3>Possession #4+ (&lt;1:30)</h3><table><tr><th></th><th>TO</th><th>1st</th><th>FG</th><th>TD</th></tr><tr><td>No def</td><td>1</td><td>2</td><td>3–4</td><td>5–6</td></tr><tr><td>Defense</td><td>1–3</td><td>4–5</td><td>6</td><td>✕</td></tr></table>'+
-  '<h3>Big plays (player takes a shot, timer pauses)</h3><p>Hail Mary: 1 TO + pick-6 roll · 2–5 nothing · 6 TD.<br>4th Down: 1–3 TO · 4–6 first down.<br>Sack: 1 auto 1st (off) · 2–4 nothing · 5–6 def −1:00 + strip roll.<br>Interception: 1 TD offense · 2–5 nothing · 6 TO + pick-6 roll.<br>Bonus rolls convert on 4–6.</p>'+
+  '<h3>Down 4</h3><table><tr><th></th><th>TO</th><th>1st</th><th>FG</th><th>TD</th></tr><tr><td>No def</td><td>1</td><td>2</td><td>3–4</td><td>5–6</td></tr><tr><td>Defense</td><td>1–3</td><td>4–5</td><td>6</td><td>✕</td></tr></table>'+
+  '<h3>Big plays (player takes a shot; everything pauses)</h3>'+
+  '<table><tr><th style="text-align:left">Play</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th></tr>'+
+  bigRow('Hail Mary',BIG.hail.map,'offense')+bigRow('4th Down',BIG.fourth.map,'offense')+
+  bigRow('Sack',BIG.sack.map,'defense')+bigRow('Interception',BIG.int.map,'defense')+'</table>'+
+  '<p>⊕ triggers a second roll by the defense — 4–6 converts (strip sack \u2192 turnover, pick \u2192 pick-six touchdown).</p>'+
   '<h3>Coaching (1/qtr, pre-snap)</h3><p>Wildcat (off) / Blitz (def): 1–3 new drinker in · 4–5 new drinker + def +1:00 / −1:00 · 6 turnover. No shot option for the extra player.</p>'+
-  '<h3>Scoring</h3><p>TD 6 · PAT +1 (miss on 1) · two-point +2 (5–6) · FG 3. Any score resets both possession streaks. After a defensive TD the offense keeps the ball.</p>'+
+  '<h3>Timeouts</h3><p>Three per team per half. A timeout freezes the game clock and the live drink timer until the calling team or the host resumes.</p>'+
+  '<h3>Scoring</h3><p>TD 6 · PAT +1 (miss on 1) · two-point +2 (5–6) · FG 3. After a defensive TD the offense keeps the ball at down 1.</p>'+
   '</div>';
 }
 function refHTML(){ return '<details><summary>Rules cheat sheet</summary>'+rulesBody()+'</details>'; }
@@ -820,12 +958,12 @@ function setupHTML(){
   '<div class="field"><label>Away players (comma-separated, min 2)</label><input id="p1" value="Nick, Mike"></div>'+
   '<div class="field"><label>Quarter length</label><select id="qlen"><option value="480">8:00</option><option value="600" selected>10:00</option><option value="720">12:00</option><option value="900">15:00</option></select></div>'+
   '<div class="field"><label>Dice</label><div class="seg"><button id="dg" class="on" onclick="segDice(\'digital\')">Digital</button><button id="dm" onclick="segDice(\'manual\')">Real dice</button></div></div>'+
-  '<button class="btn amber" onclick="launch()">Kickoff</button>'+
-  (resume?'<button class="btn" onclick="resumeGame()">Resume game in progress</button>':'')+
+  '<button class="btn amber" onclick="launch()">Kickoff (this phone only)</button>'+
   '<div class="btnrow"><button class="btn sm" onclick="hostRoom(true)">Host online room</button>'+
   '<button class="btn sm" onclick="joinRoom()">Join room</button></div>'+
   '<div class="btnrow"><button class="btn sm" onclick="openRules()">Rules & how to play</button>'+
   '<button class="btn sm" onclick="openHistory()">Game history'+(hist.length?' ('+hist.length+')':'')+'</button></div>'+
+  (resume?'<button class="btn" onclick="resumeGame()">Resume game in progress</button>':'')+
   '<button class="btn ghost sm" onclick="openSettings()">Data & settings</button></div>'+
   '<div class="card"><h2>Games in progress <button class="tool" style="float:right" onclick="loadLobbyInto(\'homeLobby\')">↻</button></h2>'+
   (R.code?'<p class="hint" style="color:var(--amber)">Connected to room '+R.code+' — waiting for the game to arrive\u2026</p>':'')+
@@ -839,7 +977,7 @@ function launch(){
   newGame({gname:$('gname').value.trim(),n0:$('n0').value,n1:$('n1').value,p0,p1,qlen:+$('qlen').value,dice:window._dice||'digital'});
 }
 function segDice(v){ window._dice=v; $('dg').classList.toggle('on',v==='digital'); $('dm').classList.toggle('on',v==='manual'); }
-function resumeGame(){ S=JSON.parse(localStorage.getItem(LSK)); S.running=false; render(); }
+function resumeGame(){ S=JSON.parse(localStorage.getItem(LSK)); S.running=false; S.canchor=null; shownEvt=(S.evt&&S.evt.n)||0; render(); }
 function finalHTML(){
   const [a,b]=S.teams; const w=a.score===b.score?null:(a.score>b.score?a:b);
   return '<div class="hero"><div class="eyebrow">Final'+(S.qtr>4?' · OT':'')+'</div><h1>'+esc(a.name)+' vs '+esc(b.name)+'</h1></div>'+
@@ -851,22 +989,26 @@ function finalHTML(){
 function openSettings(){
   const sh=$('sheet');
   const roomBits = R.code
-    ? '<p class="hint" style="margin-bottom:8px">Room <b style="color:var(--amber)">'+R.code+'</b> — '+(R.ws&&R.ws.readyState===1?'connected':'reconnecting…')+'</p>'+
+    ? '<p class="hint" style="margin-bottom:8px">Room <b style="color:var(--amber)">'+R.code+'</b> — '+(R.ws&&R.ws.readyState===1?'connected':'reconnecting…')+(myRole()?' · you: '+(myRole().name||myRole().role):'')+'</p>'+
       '<button class="btn red sm" onclick="leaveRoom()">Leave room (keep playing locally)</button>'
     : (S&&S.phase==='game'?'<button class="btn sm" onclick="hostRoom(false)">Share this game online (host room)</button>':'')+
       '<button class="btn sm" onclick="joinRoom()">Join room</button>';
-  sh.innerHTML='<h2>Menu</h2>'+(S&&S.phase!=='setup'?'<button class="btn sm" onclick="goHome()">⌂ Home (game stays saved)</button>':'')+roomBits+
+  sh.innerHTML='<h2>Menu</h2>'+
+  (S&&S.phase!=='setup'?'<button class="btn sm" onclick="goHome()">⌂ Home (game stays saved)</button>':'')+roomBits+
+  '<button class="btn sm" onclick="setAwake(!localStorage.getItem(\'dfb_awake\'));closeSettings()">Keep screen awake: '+(localStorage.getItem('dfb_awake')?'ON — turn off':'OFF — turn on')+'</button>'+
   '<button class="btn ghost sm" onclick="setServer()">Set room server URL</button>'+
-  (S&&S.phase==='game'?'<button class="btn red sm" onclick="if(confirm(\'End this game now and save it to history?\')){endGame(true);closeSettings();}">End game (save to history)</button>'+
+  (S&&S.phase==='game'&&isHost()?'<button class="btn red sm" onclick="if(confirm(\'End this game now and save it to history?\')){endGame(true);closeSettings();}">End game (save to history)</button>'+
   '<button class="btn red sm" onclick="if(confirm(\'Abandon game without saving?\')){S=null;localStorage.removeItem(LSK);closeSettings();render();}">Abandon game</button>':'')+
   '<button class="btn sm" onclick="openHistory()">Game history'+(hist.length?' ('+hist.length+')':'')+'</button>'+
   '<button class="btn sm" onclick="exportData()">Export history (JSON)</button>'+
   '<label class="btn sm" style="text-align:center">Import history<input type="file" accept=".json" style="display:none" onchange="importData(event)"></label>'+
   (hist.length?'<button class="btn red sm" onclick="if(confirm(\'Delete ALL saved game history?\')){hist=[];save();closeSettings();render();}">Clear history ('+hist.length+' games)</button>':'')+
   '<button class="btn ghost sm" onclick="closeSettings()">Close</button>'+
-  '<p class="notice">Data lives in this browser\u2019s storage. iOS can evict it if the site sits unused \u2014 export after big nights.</p>';
+  '<p class="notice">Data lives in this browser\u2019s storage — export after big nights.</p>';
   $('overlay').classList.add('show');
 }
+function setServer(){ const v=prompt('Room server URL',R.url||DEFAULT_SERVER); if(v==null)return;
+  R.url=v.trim().replace(/\/+$/,''); localStorage.setItem('dfb_server',R.url); }
 function closeSettings(){ $('overlay').classList.remove('show'); }
 function exportData(){
   const blob=new Blob([JSON.stringify({hist,exported:new Date().toISOString()},null,2)],{type:'application/json'});
@@ -884,6 +1026,7 @@ $('overlay').addEventListener('click',e=>{ if(e.target.id==='overlay')closeSetti
 (function(){
   try{ hist=JSON.parse(localStorage.getItem(LSH))||[]; }catch(e){ hist=[]; }
   S=null; render();
+  if(localStorage.getItem('dfb_awake')) setAwake(true);
 })();
 </script>
 </body>
