@@ -8,7 +8,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0E2015">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="favicon.png">
 <title>Dice Football</title>
 <style>
 :root{
@@ -963,7 +964,8 @@ function openGameDetail(i){
 function setupHTML(){
   let resume=false;
   try{ const st=JSON.parse(localStorage.getItem(LSK)); resume=st&&st.phase==='game'; }catch(e){}
-  return '<div class="hero"><div class="eyebrow">Roof deck rules</div><h1>Dice <span>Football</span></h1>'+
+  return '<div class="hero"><img src="icon-192.png" alt="" style="width:84px;height:84px;border-radius:20px;margin-bottom:8px" onerror="this.style.display=&quot;none&quot;">'+
+  '<div class="eyebrow">Roof deck rules</div><h1>Dice <span>Football</span></h1>'+
   '<p class="hint" style="margin-top:6px">Chug the down. Roll the die. Live with it.</p></div>'+
   '<div class="card"><h2>New game</h2>'+
   '<div class="field"><label>Game name</label><input id="gname" value="'+new Date().toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})+'" maxlength="40"></div>'+
